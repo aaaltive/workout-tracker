@@ -298,15 +298,17 @@ const BADGES = [
 
 /* ============================= STORAGE ============================= */
 const STORE_KEY = "calisthenicsPlanData_v1";
+const DEFAULT_DAY_MAP = {1:1,2:2,3:3,4:4,5:5,6:6};
 function loadData(){
   try{
     const raw = localStorage.getItem(STORE_KEY);
     if(raw) return JSON.parse(raw);
   }catch(e){}
-  return {logs:{}, settings:{weekOverride:"auto"}, earnedBadges:{}};
+  return {logs:{}, settings:{weekOverride:"auto", dayMap:{...DEFAULT_DAY_MAP}}, earnedBadges:{}};
 }
 function saveData(){ localStorage.setItem(STORE_KEY, JSON.stringify(DATA)); }
 let DATA = loadData();
+if(!DATA.settings.dayMap) DATA.settings.dayMap = {...DEFAULT_DAY_MAP};
 
 /* ============================= HELPERS ============================= */
 function pad(n){ return n<10 ? "0"+n : ""+n; }
@@ -327,7 +329,33 @@ function weekLetterFor(d){
 const DOW_NAMES = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
 const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 
-function planFor(d){ return PLAN[d.getDay()]; }
+function mappedDow(dow){
+  if(dow===0) return 0; // Sunday is always the rest day, never swappable
+  const map = DATA.settings.dayMap;
+  return (map && map[dow]) ? map[dow] : dow;
+}
+function planFor(d){ return PLAN[mappedDow(d.getDay())]; }
+function swappableDayOptions(){
+  let html = "";
+  for(let dow=1; dow<=6; dow++){
+    const plan = PLAN[mappedDow(dow)];
+    const label = DOW_NAMES[dow] + (plan ? " — " + plan.title : " — Rest");
+    html += `<option value="${dow}">${label}</option>`;
+  }
+  return html;
+}
+function dayOrderSummary(){
+  let rows = "";
+  for(let dow=1; dow<=6; dow++){
+    const plan = PLAN[mappedDow(dow)];
+    rows += `${DOW_NAMES[dow]}: ${plan ? plan.title + (plan.subtitle? " · "+plan.subtitle : "") : "Rest"}<br>`;
+  }
+  return rows;
+}
+function isDayMapDefault(){
+  const map = DATA.settings.dayMap || DEFAULT_DAY_MAP;
+  return [1,2,3,4,5,6].every(k => (map[k]||k) === DEFAULT_DAY_MAP[k]);
+}
 function itemsFor(plan, weekLetter){
   return plan.items.filter(it => it.week==="both" || it.week===weekLetter);
 }
@@ -430,7 +458,7 @@ function renderToday(){
   const d = todayDate();
   const key = dateKey(d);
   const dow = d.getDay();
-  const plan = PLAN[dow];
+  const plan = PLAN[mappedDow(dow)];
   const weekLetter = weekLetterFor(d);
   const log = logFor(key);
   log.dow = dow; log.week = plan && plan.hasAlt ? weekLetter : null;
@@ -722,7 +750,7 @@ function showDayModal(key){
   const log = DATA.logs[key];
   const d = new Date(key+"T00:00:00");
   const dow = d.getDay();
-  const plan = PLAN[dow];
+  const plan = PLAN[mappedDow(dow)];
   const isFuture = d > todayDate();
   const root = document.getElementById("modalRoot");
   let body = "";
@@ -846,6 +874,28 @@ function renderSettings(){
     <div class="card">
       <div class="settings-row">
         <div>
+          <div class="lbl">Swap workout days</div>
+          <div class="desc">Permanently swap which day two workouts fall on. Applies to this week and every week after.</div>
+        </div>
+      </div>
+      <div class="row2" style="margin-top:8px;align-items:flex-end;">
+        <div class="field">
+          <label>Day A</label>
+          <select id="swapDayA">${swappableDayOptions()}</select>
+        </div>
+        <div class="field">
+          <label>Day B</label>
+          <select id="swapDayB">${swappableDayOptions()}</select>
+        </div>
+      </div>
+      <button class="btn block" id="swapDaysBtn">⇄ Swap these days</button>
+      <div style="font-size:11.5px;color:var(--muted);margin-top:10px;line-height:1.7;">${dayOrderSummary()}</div>
+      ${isDayMapDefault() ? "" : `<button class="btn small ghost" id="resetDaysBtn" style="margin-top:8px;">Restore original day order</button>`}
+    </div>
+
+    <div class="card">
+      <div class="settings-row">
+        <div>
           <div class="lbl">Backup to Google Drive</div>
           <div class="desc">Saves history, streaks &amp; badges as a file. When the share sheet opens, pick <b>Google Drive</b> (or Files → Drive) to save it there.</div>
         </div>
@@ -888,6 +938,27 @@ function renderSettings(){
       renderSettings();
     };
   });
+  document.getElementById("swapDaysBtn").onclick = ()=>{
+    const a = parseInt(document.getElementById("swapDayA").value, 10);
+    const b = parseInt(document.getElementById("swapDayB").value, 10);
+    if(a===b) return;
+    if(!DATA.settings.dayMap) DATA.settings.dayMap = {...DEFAULT_DAY_MAP};
+    const map = DATA.settings.dayMap;
+    const tmp = map[a] || a;
+    map[a] = map[b] || b;
+    map[b] = tmp;
+    saveData();
+    renderSettings();
+    showSimpleToast("Days swapped", `${DOW_NAMES[a]} and ${DOW_NAMES[b]} will now swap workouts every week, starting immediately.`);
+  };
+  const resetDaysBtn = document.getElementById("resetDaysBtn");
+  if(resetDaysBtn){
+    resetDaysBtn.onclick = ()=>{
+      DATA.settings.dayMap = {...DEFAULT_DAY_MAP};
+      saveData();
+      renderSettings();
+    };
+  }
   document.getElementById("exportBtn").onclick = async ()=>{
     const blob = new Blob([JSON.stringify(DATA,null,2)], {type:"application/json"});
     const fileName = "workout-data-backup-"+dateKey(todayDate())+".json";
