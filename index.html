@@ -160,6 +160,7 @@
   <nav class="tabbar">
     <button data-tab="today" class="active"><span class="ic">🏋️</span>Today</button>
     <button data-tab="history"><span class="ic">📅</span>History</button>
+    <button data-tab="goals"><span class="ic">🎯</span>Goals</button>
     <button data-tab="awards"><span class="ic">🏆</span>Awards</button>
     <button data-tab="settings"><span class="ic">⚙️</span>Settings</button>
   </nav>
@@ -294,7 +295,26 @@ const BADGES = [
   {id:"dist26",     ic:"🎽", name:"Marathon Club",    desc:"26.2 total cardio miles logged", check:(s)=>s.totalMiles>=26.2, prog:(s)=>[s.totalMiles.toFixed(1),26.2]},
   {id:"dist50",     ic:"🌊", name:"50 Mile Club",     desc:"50 total cardio miles logged", check:(s)=>s.totalMiles>=50, prog:(s)=>[s.totalMiles.toFixed(1),50]},
   {id:"triple",     ic:"🎯", name:"Triple Threat",    desc:"Log a run, a bike, and a swim", check:(s)=>s.cardioTypes.size>=3, prog:(s)=>[s.cardioTypes.size,3]},
+  {id:"goalCreated", ic:"🎯", name:"Goal Setter",     desc:"Create a custom goal", check:(s)=>s.goalsCreated>=1},
+  {id:"goalHalfway", ic:"📈", name:"Halfway There",   desc:"Reach 50% progress on a goal", check:(s)=>s.maxGoalProgress>=0.5},
+  {id:"goalMet",     ic:"🥇", name:"Goal Crusher",    desc:"Fully complete a custom goal", check:(s)=>s.goalsCompleted>=1},
+  {id:"goal3",       ic:"👑", name:"Goal Machine",    desc:"Complete 3 custom goals", check:(s)=>s.goalsCompleted>=3, prog:(s)=>[s.goalsCompleted,3]},
 ];
+
+/* ============================= GOAL TEMPLATES ============================= */
+const PLANCHE_GOAL_TEMPLATE = {
+  name: "Do 1 planche push-up",
+  milestones: [
+    {name:"Do a strict set of 10 regular push-ups", url:"https://dieringe.com/exercises/push-ups"},
+    {name:"Hold a Pseudo Planche Lean for 20 seconds", url:"https://dieringe.com/exercises/pseudo-planche-lean"},
+    {name:"Do 5 Pseudo Planche push-ups", url:"https://dieringe.com/exercises/pseudo-planche-push-ups"},
+    {name:"Hold a Tuck Planche for 10 seconds", url:"https://dieringe.com/exercises/tuck-planche"},
+    {name:"Do 3 Tuck Planche push-ups", url:"https://dieringe.com/exercises/tuck-planche-push-up"},
+    {name:"Hold an Advanced Tuck Planche for 10 seconds", url:"https://dieringe.com/exercises/advanced-tuck-planche"},
+    {name:"Hold a Straddle Planche for 5 seconds", url:"https://dieringe.com/exercises/straddle-planche"},
+    {name:"Do 1 full Planche push-up", url:"https://dieringe.com/exercises/planche-push-up"},
+  ]
+};
 
 /* ============================= STORAGE ============================= */
 const STORE_KEY = "calisthenicsPlanData_v1";
@@ -304,11 +324,12 @@ function loadData(){
     const raw = localStorage.getItem(STORE_KEY);
     if(raw) return JSON.parse(raw);
   }catch(e){}
-  return {logs:{}, settings:{weekOverride:"auto", dayMap:{...DEFAULT_DAY_MAP}}, earnedBadges:{}};
+  return {logs:{}, settings:{weekOverride:"auto", dayMap:{...DEFAULT_DAY_MAP}}, earnedBadges:{}, goals:[]};
 }
 function saveData(){ localStorage.setItem(STORE_KEY, JSON.stringify(DATA)); }
 let DATA = loadData();
 if(!DATA.settings.dayMap) DATA.settings.dayMap = {...DEFAULT_DAY_MAP};
+if(!DATA.goals) DATA.goals = [];
 
 /* ============================= HELPERS ============================= */
 function pad(n){ return n<10 ? "0"+n : ""+n; }
@@ -369,6 +390,9 @@ function milesFromEntry(c){
   if(c.unit==="km") d = d*0.621371;
   return d;
 }
+function uid(prefix){ return prefix+"_"+Date.now().toString(36)+"_"+Math.random().toString(36).slice(2,7); }
+function goalProgress(g){ return g.milestones.length ? g.milestones.filter(m=>m.done).length / g.milestones.length : 0; }
+function isGoalComplete(g){ return g.milestones.length>0 && g.milestones.every(m=>m.done); }
 
 /* ============================= STATE ============================= */
 let activeTab = "today";
@@ -436,7 +460,12 @@ function computeStats(){
     if(byWeek[wk].size>=6) perfectWeeks++;
   }
 
-  return {totalWorkouts, totalMiles, cardioTypes, longestStreak:longest, currentStreak:cur, perfectWeeks};
+  const goalsCreated = DATA.goals.length;
+  const goalsCompleted = DATA.goals.filter(isGoalComplete).length;
+  const maxGoalProgress = DATA.goals.reduce((mx,g)=>Math.max(mx, goalProgress(g)), 0);
+
+  return {totalWorkouts, totalMiles, cardioTypes, longestStreak:longest, currentStreak:cur, perfectWeeks,
+    goalsCreated, goalsCompleted, maxGoalProgress};
 }
 
 function checkNewBadges(){
@@ -451,6 +480,42 @@ function checkNewBadges(){
   });
   if(newly.length) saveData();
   return newly;
+}
+
+/* ============================= GOAL TRAINING (shown on Today) ============================= */
+function goalExercisesCardHtml(key){
+  const activeGoals = DATA.goals.filter(g=>!isGoalComplete(g) && g.exercises && g.exercises.length);
+  if(!activeGoals.length) return "";
+  const log = logFor(key);
+  let html = `<div class="card"><h2>🎯 Goal Training</h2>`;
+  activeGoals.forEach(g=>{
+    html += `<div style="font-size:12px;font-weight:800;color:var(--navy);text-transform:uppercase;letter-spacing:.04em;margin:12px 0 2px;">${g.name}</div>`;
+    g.exercises.forEach(ex=>{
+      const gid = `goal_${g.id}_${ex.id}`;
+      const isDone = !!log.done[gid];
+      html += `
+        <div class="exercise" data-goalex="${gid}">
+          <div class="checkbox ${isDone?'checked':''}"></div>
+          <div class="ex-body">
+            <div class="ex-title-row"><span class="ex-name ${isDone?'done':''}">${ex.name}</span></div>
+            ${ex.sr ? `<div class="ex-sr">${ex.sr}</div>` : ""}
+          </div>
+        </div>`;
+    });
+  });
+  html += `</div>`;
+  return html;
+}
+function wireGoalExerciseCheckboxes(key, view){
+  view.querySelectorAll(".exercise[data-goalex]").forEach(row=>{
+    row.querySelector(".checkbox").onclick = ()=>{
+      const gid = row.getAttribute("data-goalex");
+      const log = logFor(key);
+      log.done[gid] = !log.done[gid];
+      saveData();
+      renderToday();
+    };
+  });
 }
 
 /* ============================= RENDER: TODAY ============================= */
@@ -477,12 +542,13 @@ function renderToday(){
         <h2>Rest Day</h2>
         <p>No structured training today - recovery is what lets the rest of the week's work actually build muscle. Light walking or stretching is totally fine.</p>
         <button class="btn ghost" id="restLogBtn" style="margin-top:14px;">${log.fullyCompleted? "✓ Logged as rested" : "Mark today as rested"}</button>
-      </div>`;
+      </div>` + goalExercisesCardHtml(key);
     document.getElementById("restLogBtn").onclick = ()=>{
       log.fullyCompleted = true;
       saveData();
       renderToday();
     };
+    wireGoalExerciseCheckboxes(key, view);
     showInstallTipIfNeeded();
     return;
   }
@@ -551,7 +617,9 @@ function renderToday(){
     }
   });
 
-  html += `</div>
+  html += `</div>`;
+  html += goalExercisesCardHtml(key);
+  html += `
     <button class="btn finish-btn" id="finishBtn" ${canFinish?'':'disabled'}>${log.fullyCompleted ? "✓ Workout Complete" : "Complete Workout"}</button>
   `;
   view.innerHTML = html;
@@ -602,6 +670,8 @@ function renderToday(){
       renderToday();
     };
   });
+
+  wireGoalExerciseCheckboxes(key, view);
 
   const finishBtn = document.getElementById("finishBtn");
   if(finishBtn){
@@ -834,6 +904,254 @@ function renderAwards(){
   view.innerHTML = html;
 }
 
+/* ============================= RENDER: GOALS ============================= */
+function goalCardHtml(g){
+  const total = g.milestones.length;
+  const done = g.milestones.filter(m=>m.done).length;
+  const pct = total ? Math.round((done/total)*100) : 0;
+  const complete = isGoalComplete(g);
+  let html = `<div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">
+      <div>
+        <div style="font-size:15.5px;font-weight:700;">${complete? "🏆 " : ""}${g.name}</div>
+        <div style="font-size:11.5px;color:var(--muted);margin-top:2px;">${done}/${total} milestones${complete? " · Complete!" : ""}</div>
+      </div>
+      <button class="btn small danger" data-delgoal="${g.id}">Delete</button>
+    </div>
+    <div class="progress-wrap" style="margin-top:10px;">
+      <div class="progress-bar"><div style="width:${pct}%"></div></div>
+      <div class="progress-label">${pct}%</div>
+    </div>
+
+    <div class="section-title" style="margin:14px 0 4px;">Milestones</div>`;
+
+  if(!g.milestones.length){
+    html += `<div style="font-size:12.5px;color:var(--muted);">No milestones yet — add the steps toward this goal below.</div>`;
+  }
+  g.milestones.forEach(m=>{
+    html += `
+      <div class="exercise" style="padding:8px 0;">
+        <div class="checkbox ${m.done?'checked':''}" data-togglemilestone="${g.id}|${m.id}"></div>
+        <div class="ex-body">
+          <span class="ex-name ${m.done?'done':''}">${m.name}</span>
+          ${m.url ? `<a class="ex-link" href="${m.url}" target="_blank" rel="noopener">How-to guide →</a>` : ""}
+        </div>
+        <button class="btn small ghost" data-delmilestone="${g.id}|${m.id}" style="padding:4px 9px;font-size:11px;">×</button>
+      </div>`;
+  });
+  html += `
+    <div class="row2" style="margin-top:8px;">
+      <div class="field"><input type="text" placeholder="Add a milestone…" data-newmilestone="${g.id}"></div>
+    </div>
+    <button class="btn small block" data-addmilestone="${g.id}" style="margin-top:6px;">+ Add milestone</button>
+
+    <div class="section-title" style="margin:14px 0 4px;">Custom Exercises</div>`;
+
+  if(g.exercises.length){
+    g.exercises.forEach(ex=>{
+      html += `
+        <div class="exercise" style="padding:8px 0;">
+          <div class="ex-body">
+            <span class="ex-name">${ex.name}</span>
+            ${ex.sr ? `<div class="ex-sr">${ex.sr}</div>` : ""}
+          </div>
+          <button class="btn small ghost" data-delexercise="${g.id}|${ex.id}" style="padding:4px 9px;font-size:11px;">×</button>
+        </div>`;
+    });
+  } else {
+    html += `<div style="font-size:12.5px;color:var(--muted);">None yet — exercises you add here show up in "Goal Training" on Today.</div>`;
+  }
+  html += `
+    <div class="row2" style="margin-top:8px;">
+      <div class="field"><label>Exercise name</label><input type="text" placeholder="e.g. Pseudo planche push-up" data-newexname="${g.id}"></div>
+      <div class="field"><label>Sets x reps</label><input type="text" placeholder="e.g. 3 x 6" data-newexsr="${g.id}"></div>
+    </div>
+    <button class="btn small block" data-addexercise="${g.id}" style="margin-top:6px;">+ Add exercise to routine</button>
+  </div>`;
+  return html;
+}
+
+function renderGoals(){
+  document.getElementById("hdrTitle").innerHTML = `<h1>Goals</h1>`;
+  document.getElementById("hdrSub").textContent = "Custom goals, milestones & routine exercises";
+  document.getElementById("hdrWeekPill").innerHTML = "";
+
+  const view = document.getElementById("view");
+  view.innerHTML = `
+    <button class="btn block" id="newGoalBtn" style="margin-bottom:14px;">+ New Goal</button>
+    ${DATA.goals.length ? DATA.goals.map(goalCardHtml).join("") :
+      `<div class="card" style="text-align:center;color:var(--muted);font-size:13.5px;padding:30px 16px;">
+        No goals yet. Tap "New Goal" to build your own, or try the sample goal.
+      </div>`}
+  `;
+
+  document.getElementById("newGoalBtn").onclick = showNewGoalModal;
+
+  if(!DATA.goals.length) showGoalIntroModal();
+
+  view.querySelectorAll("[data-delgoal]").forEach(btn=>{
+    btn.onclick = ()=>{
+      const id = btn.getAttribute("data-delgoal");
+      if(!confirm("Delete this goal? Its milestones and exercises will be lost.")) return;
+      DATA.goals = DATA.goals.filter(g=>g.id!==id);
+      saveData();
+      renderGoals();
+    };
+  });
+
+  view.querySelectorAll("[data-togglemilestone]").forEach(box=>{
+    box.onclick = ()=>{
+      const [gid, mid] = box.getAttribute("data-togglemilestone").split("|");
+      const g = DATA.goals.find(x=>x.id===gid);
+      const m = g && g.milestones.find(x=>x.id===mid);
+      if(!m) return;
+      m.done = !m.done;
+      saveData();
+      renderGoals();
+      const newly = checkNewBadges();
+      if(newly.length) showBadgeToast(newly);
+    };
+  });
+
+  view.querySelectorAll("[data-delmilestone]").forEach(btn=>{
+    btn.onclick = ()=>{
+      const [gid, mid] = btn.getAttribute("data-delmilestone").split("|");
+      const g = DATA.goals.find(x=>x.id===gid);
+      if(!g) return;
+      g.milestones = g.milestones.filter(x=>x.id!==mid);
+      saveData();
+      renderGoals();
+    };
+  });
+
+  view.querySelectorAll("[data-addmilestone]").forEach(btn=>{
+    btn.onclick = ()=>{
+      const gid = btn.getAttribute("data-addmilestone");
+      const input = view.querySelector(`[data-newmilestone="${gid}"]`);
+      const name = input.value.trim();
+      if(!name) return;
+      const g = DATA.goals.find(x=>x.id===gid);
+      g.milestones.push({id:uid("m"), name, done:false});
+      saveData();
+      renderGoals();
+      const newly = checkNewBadges();
+      if(newly.length) showBadgeToast(newly);
+    };
+  });
+
+  view.querySelectorAll("[data-delexercise]").forEach(btn=>{
+    btn.onclick = ()=>{
+      const [gid, exid] = btn.getAttribute("data-delexercise").split("|");
+      const g = DATA.goals.find(x=>x.id===gid);
+      if(!g) return;
+      g.exercises = g.exercises.filter(x=>x.id!==exid);
+      saveData();
+      renderGoals();
+    };
+  });
+
+  view.querySelectorAll("[data-addexercise]").forEach(btn=>{
+    btn.onclick = ()=>{
+      const gid = btn.getAttribute("data-addexercise");
+      const nameInput = view.querySelector(`[data-newexname="${gid}"]`);
+      const srInput = view.querySelector(`[data-newexsr="${gid}"]`);
+      const name = nameInput.value.trim();
+      const sr = srInput.value.trim();
+      if(!name){ alert("Give the exercise a name first."); return; }
+      const g = DATA.goals.find(x=>x.id===gid);
+      g.exercises.push({id:uid("ex"), name, sr});
+      saveData();
+      renderGoals();
+    };
+  });
+}
+
+function showNewGoalModal(){
+  const root = document.getElementById("modalRoot");
+  root.innerHTML = `
+    <div class="toast-overlay" id="goalOverlay">
+      <div class="modal-day" style="position:relative;max-height:82vh;overflow-y:auto;text-align:left;">
+        <button class="close-x" id="goalModalClose">×</button>
+        <h3>New Goal</h3>
+        <div class="field" style="margin-bottom:10px;">
+          <label>Goal name</label>
+          <input type="text" id="newGoalName" placeholder="e.g. Do 1 planche push-up">
+        </div>
+        <div class="field">
+          <label>Milestones (one per line, in order)</label>
+          <textarea id="newGoalMilestones" rows="6" placeholder="e.g.&#10;Do 10 strict push-ups&#10;Hold pseudo planche lean 20 sec"></textarea>
+        </div>
+        <button class="btn block" id="createGoalBtn" style="margin-top:12px;">Create Goal</button>
+      </div>
+    </div>`;
+  document.getElementById("goalModalClose").onclick = ()=>{ root.innerHTML=""; };
+  document.getElementById("goalOverlay").onclick = (e)=>{ if(e.target.id==="goalOverlay") root.innerHTML=""; };
+  document.getElementById("createGoalBtn").onclick = ()=>{
+    const name = document.getElementById("newGoalName").value.trim();
+    if(!name){ alert("Give your goal a name first."); return; }
+    const lines = document.getElementById("newGoalMilestones").value.split("\n").map(s=>s.trim()).filter(Boolean);
+    const goal = {
+      id: uid("goal"),
+      name,
+      createdAt: Date.now(),
+      milestones: lines.map(l=>({id:uid("m"), name:l, done:false})),
+      exercises: []
+    };
+    DATA.goals.push(goal);
+    saveData();
+    root.innerHTML = "";
+    renderGoals();
+    const newly = checkNewBadges();
+    if(newly.length) showBadgeToast(newly);
+  };
+}
+
+function addPlancheTemplateGoal(){
+  const goal = {
+    id: uid("goal"),
+    name: PLANCHE_GOAL_TEMPLATE.name,
+    createdAt: Date.now(),
+    milestones: PLANCHE_GOAL_TEMPLATE.milestones.map(m=>({id:uid("m"), name:m.name, url:m.url, done:false})),
+    exercises: []
+  };
+  DATA.goals.push(goal);
+  saveData();
+  renderGoals();
+  const newly = checkNewBadges();
+  if(newly.length) showBadgeToast(newly);
+}
+
+function showGoalIntroModal(){
+  const root = document.getElementById("modalRoot");
+  root.innerHTML = `
+    <div class="toast-overlay" id="goalIntroOverlay">
+      <div class="modal-day" style="position:relative;max-height:82vh;overflow-y:auto;text-align:left;">
+        <button class="close-x" id="goalIntroClose">×</button>
+        <h3>🎯 Try a Goal</h3>
+        <p style="color:var(--muted);font-size:13.5px;line-height:1.5;margin-top:0;">
+          Goals let you work toward a specific skill with milestones, a progress bar, and optional custom
+          exercises added right into "Today". Not sure where to start? Try the sample below —
+          it comes pre-loaded with 8 milestones and a how-to guide link for each one.
+        </p>
+        <div class="card" style="background:var(--soft);margin:14px 0;">
+          <div style="font-weight:700;font-size:14.5px;">🤸 Do 1 planche push-up</div>
+          <div style="font-size:12px;color:var(--muted);margin-top:4px;">
+            ${PLANCHE_GOAL_TEMPLATE.milestones.length} milestones, from a strict push-up all the way to a full planche push-up.
+          </div>
+        </div>
+        <button class="btn block" id="tryPlancheGoal">Add this goal</button>
+        <button class="btn small ghost block" id="skipGoalIntro" style="margin-top:8px;">I'll build my own</button>
+      </div>
+    </div>`;
+  document.getElementById("goalIntroClose").onclick = ()=>{ root.innerHTML=""; };
+  document.getElementById("goalIntroOverlay").onclick = (e)=>{ if(e.target.id==="goalIntroOverlay") root.innerHTML=""; };
+  document.getElementById("skipGoalIntro").onclick = ()=>{ root.innerHTML=""; };
+  document.getElementById("tryPlancheGoal").onclick = ()=>{
+    root.innerHTML = "";
+    addPlancheTemplateGoal();
+  };
+}
+
 /* ============================= RENDER: SETTINGS ============================= */
 function renderSettings(){
   document.getElementById("hdrTitle").innerHTML = `<h1>Settings</h1>`;
@@ -1002,6 +1320,8 @@ function renderSettings(){
         const parsed = JSON.parse(reader.result);
         if(parsed && parsed.logs){
           DATA = parsed;
+          if(!DATA.goals) DATA.goals = [];
+          if(!DATA.settings.dayMap) DATA.settings.dayMap = {...DEFAULT_DAY_MAP};
           saveData();
           showSimpleToast("Imported!", "Your backup has been restored.");
           renderSettings();
@@ -1012,7 +1332,7 @@ function renderSettings(){
   };
   document.getElementById("resetBtn").onclick = ()=>{
     if(confirm("Erase all workout history, streaks, and badges? This can't be undone.")){
-      DATA = {logs:{}, settings:{weekOverride:"auto"}, earnedBadges:{}};
+      DATA = {logs:{}, settings:{weekOverride:"auto"}, earnedBadges:{}, goals:[]};
       saveData();
       showSimpleToast("Reset complete", "Starting fresh.");
       renderSettings();
@@ -1028,6 +1348,7 @@ function renderTab(tab){
   });
   if(tab==="today") renderToday();
   else if(tab==="history"){ historyMonthOffset=0; renderHistory(); }
+  else if(tab==="goals") renderGoals();
   else if(tab==="awards") renderAwards();
   else if(tab==="settings") renderSettings();
 }
