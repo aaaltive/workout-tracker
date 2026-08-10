@@ -324,11 +324,12 @@ function loadData(){
     const raw = localStorage.getItem(STORE_KEY);
     if(raw) return JSON.parse(raw);
   }catch(e){}
-  return {logs:{}, settings:{weekOverride:"auto", dayMap:{...DEFAULT_DAY_MAP}}, earnedBadges:{}, goals:[]};
+  return {logs:{}, settings:{weekOverride:"auto", dayMap:{...DEFAULT_DAY_MAP}, exerciseOverrides:{}}, earnedBadges:{}, goals:[]};
 }
 function saveData(){ localStorage.setItem(STORE_KEY, JSON.stringify(DATA)); }
 let DATA = loadData();
 if(!DATA.settings.dayMap) DATA.settings.dayMap = {...DEFAULT_DAY_MAP};
+if(!DATA.settings.exerciseOverrides) DATA.settings.exerciseOverrides = {};
 if(!DATA.goals) DATA.goals = [];
 
 /* ============================= HELPERS ============================= */
@@ -377,9 +378,80 @@ function isDayMapDefault(){
   const map = DATA.settings.dayMap || DEFAULT_DAY_MAP;
   return [1,2,3,4,5,6].every(k => (map[k]||k) === DEFAULT_DAY_MAP[k]);
 }
-function itemsFor(plan, weekLetter){
-  return plan.items.filter(it => it.week==="both" || it.week===weekLetter);
+/* ============================= SETS/REPS CUSTOMIZATION ============================= */
+// Parses a leading "N x M" (or "N-N2 x M-M2") pattern out of a plan item's "sr" string,
+// e.g. "3 x 10-15" or "2-3 x 30-45 sec". Returns null when the item isn't expressed as
+// sets x reps (e.g. "3-4 x to near-failure", "2 x max") - those stay uncustomizable.
+function parseSR(sr){
+  if(!sr) return null;
+  const m = sr.match(/^(\d+)(?:-\d+)?\s*[x×]\s*(\d+)(?:-\d+)?/i);
+  if(!m) return null;
+  const sets = parseInt(m[1],10);
+  const reps = parseInt(m[2],10);
+  const suffix = sr.slice(m[0].length); // keeps original spacing/punctuation, e.g. " sec" or "/side"
+  const isTime = /^\s*(sec|second|min|minute)/i.test(suffix);
+  return {sets, reps, suffix, isTime};
 }
+function exerciseOverride(id){
+  return (DATA.settings.exerciseOverrides || {})[id] || null;
+}
+function setExerciseOverride(id, sets, reps){
+  if(!DATA.settings.exerciseOverrides) DATA.settings.exerciseOverrides = {};
+  DATA.settings.exerciseOverrides[id] = {sets, reps};
+}
+function clearExerciseOverride(id){
+  if(DATA.settings.exerciseOverrides) delete DATA.settings.exerciseOverrides[id];
+}
+// Applies any saved override on top of an item's parsed default, returning the effective
+// sets/reps/sr text plus metadata used to render the edit control and estimate duration.
+function effectiveSR(it){
+  const parsed = parseSR(it.sr);
+  if(!parsed) return {sr:it.sr, sets:null, reps:null, isTime:false, editable:false, customized:false};
+  const ov = exerciseOverride(it.id);
+  const sets = ov ? ov.sets : parsed.sets;
+  const reps = ov ? ov.reps : parsed.reps;
+  const sr = ov ? `${sets} x ${reps}${parsed.suffix}` : it.sr;
+  return {sr, sets, reps, isTime:parsed.isTime, editable:true, customized:!!ov};
+}
+function itemsFor(plan, weekLetter){
+  return plan.items.filter(it => it.week==="both" || it.week===weekLetter).map(it=>{
+    const eff = effectiveSR(it);
+    return {...it, sr:eff.sr, _sets:eff.sets, _reps:eff.reps, _isTime:eff.isTime, _editable:eff.editable, _customized:eff.customized};
+  });
+}
+// Rough estimate of total workout time: working time (reps/hold-seconds) + rest between sets
+// for strength items, logged/typical duration for cardio, and a small per-exercise buffer.
+const REST_SEC_PER_SET = 45;
+const SEC_PER_REP = 3;
+const TRANSITION_SEC = 10;
+function estimateWorkoutSeconds(items, log){
+  let total = 0;
+  items.forEach(it=>{
+    if(it.type==="cardio"){
+      const c = log && log.cardio && log.cardio[it.id];
+      if(c && c.duration){
+        total += (parseFloat(c.duration)||0) * 60;
+      } else {
+        const m = it.sr.match(/(\d+)(?:-(\d+))?\s*min/i);
+        if(m){
+          const lo = parseInt(m[1],10), hi = m[2]?parseInt(m[2],10):lo;
+          total += ((lo+hi)/2) * 60;
+        }
+      }
+      return;
+    }
+    if(it._sets && it._reps){
+      const work = it._isTime ? it._sets*it._reps : it._sets*it._reps*SEC_PER_REP;
+      const rest = Math.max(0, it._sets-1) * REST_SEC_PER_SET;
+      total += work + rest;
+    } else {
+      total += 90; // flat fallback for items not expressed as sets x reps
+    }
+    total += TRANSITION_SEC;
+  });
+  return total;
+}
+function fmtDurationMin(sec){ return Math.max(1, Math.round(sec/60)); }
 function logFor(dateStr){
   if(!DATA.logs[dateStr]) DATA.logs[dateStr] = {done:{}, cardio:null, fullyCompleted:false, week:null, dow:null};
   return DATA.logs[dateStr];
@@ -397,6 +469,7 @@ function isGoalComplete(g){ return g.milestones.length>0 && g.milestones.every(m
 /* ============================= STATE ============================= */
 let activeTab = "today";
 let historyMonthOffset = 0; // 0 = current month
+let editingExId = null; // id of the exercise currently showing the sets/reps editor on Today
 
 /* ============================= STATS COMPUTATION ============================= */
 function computeStats(){
@@ -559,13 +632,15 @@ function renderToday(){
   const allCardioLogged = cardioItems.every(it => log.cardio && log.cardio[it.id]);
   const pct = Math.round((doneCount/items.length)*100);
   const canFinish = doneCount===items.length;
+  const estMin = fmtDurationMin(estimateWorkoutSeconds(items, log));
 
   let html = `
     <div class="card">
       <div class="progress-wrap">
         <div class="progress-bar"><div style="width:${pct}%"></div></div>
         <div class="progress-label">${doneCount}/${items.length}</div>
-      </div>`;
+      </div>
+      <div style="font-size:12.5px;color:var(--muted);margin:-6px 0 4px;">⏱ Est. duration: ~${estMin} min</div>`;
 
   items.forEach(it=>{
     const isDone = !!log.done[it.id];
@@ -601,6 +676,22 @@ function renderToday(){
           </div>
         </div>`;
     } else {
+      const isEditing = editingExId === it.id;
+      let srBlock;
+      if(isEditing){
+        srBlock = `
+          <div class="row2" style="margin-top:6px;">
+            <div class="field"><label>Sets</label><input type="number" inputmode="numeric" min="1" max="20" id="sets_${it.id}" value="${it._sets}"></div>
+            <div class="field"><label>${it._isTime ? "Seconds/set" : "Reps"}</label><input type="number" inputmode="numeric" min="1" max="200" id="reps_${it.id}" value="${it._reps}"></div>
+          </div>
+          <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;">
+            <button class="btn small" data-saveex="${it.id}">Save</button>
+            <button class="btn small ghost" data-cancelex="${it.id}">Cancel</button>
+            ${it._customized ? `<button class="btn small ghost" data-resetex="${it.id}">Reset to default</button>` : ""}
+          </div>`;
+      } else {
+        srBlock = `<div class="ex-sr">${it.sr}${it._editable ? ` <button class="btn small ghost" data-editex="${it.id}" style="margin-left:4px;padding:2px 9px;font-size:11px;">Edit</button>` : ""}</div>`;
+      }
       html += `
         <div class="exercise" data-ex="${it.id}">
           <div class="checkbox ${isDone?'checked':''}"></div>
@@ -608,8 +699,9 @@ function renderToday(){
             <div class="ex-title-row">
               <span class="ex-name ${isDone?'done':''}">${it.name}</span>
               ${it.week!=="both" ? `<span class="badge-week ${it.week}">${it.week}</span>` : ""}
+              ${it._customized ? `<span class="badge-week" style="background:var(--gold);">CUSTOM</span>` : ""}
             </div>
-            <div class="ex-sr">${it.sr}</div>
+            ${srBlock}
             ${it.notes ? `<div class="ex-notes">${it.notes}</div>` : ""}
             ${it.url ? `<a class="ex-link" href="${it.url}" target="_blank" rel="noopener">How-to guide →</a>` : ""}
           </div>
@@ -629,6 +721,39 @@ function renderToday(){
     row.querySelector(".checkbox").onclick = ()=>{
       const id = row.getAttribute("data-ex");
       log.done[id] = !log.done[id];
+      saveData();
+      renderToday();
+    };
+  });
+  // sets/reps customization
+  view.querySelectorAll("[data-editex]").forEach(btn=>{
+    btn.onclick = ()=>{
+      editingExId = btn.getAttribute("data-editex");
+      renderToday();
+    };
+  });
+  view.querySelectorAll("[data-cancelex]").forEach(btn=>{
+    btn.onclick = ()=>{
+      editingExId = null;
+      renderToday();
+    };
+  });
+  view.querySelectorAll("[data-resetex]").forEach(btn=>{
+    btn.onclick = ()=>{
+      clearExerciseOverride(btn.getAttribute("data-resetex"));
+      editingExId = null;
+      saveData();
+      renderToday();
+    };
+  });
+  view.querySelectorAll("[data-saveex]").forEach(btn=>{
+    btn.onclick = ()=>{
+      const id = btn.getAttribute("data-saveex");
+      const sets = parseInt(document.getElementById("sets_"+id).value, 10);
+      const reps = parseInt(document.getElementById("reps_"+id).value, 10);
+      if(!sets || sets<1 || !reps || reps<1){ alert("Enter a valid number of sets and reps."); return; }
+      setExerciseOverride(id, sets, reps);
+      editingExId = null;
       saveData();
       renderToday();
     };
@@ -1343,6 +1468,7 @@ function renderSettings(){
 /* ============================= TAB SWITCHING ============================= */
 function renderTab(tab){
   activeTab = tab;
+  if(tab!=="today") editingExId = null;
   document.querySelectorAll("nav.tabbar button").forEach(b=>{
     b.classList.toggle("active", b.getAttribute("data-tab")===tab);
   });
