@@ -324,12 +324,14 @@ function loadData(){
     const raw = localStorage.getItem(STORE_KEY);
     if(raw) return JSON.parse(raw);
   }catch(e){}
-  return {logs:{}, settings:{weekOverride:"auto", dayMap:{...DEFAULT_DAY_MAP}, exerciseOverrides:{}}, earnedBadges:{}, goals:[]};
+  return {logs:{}, settings:{weekOverride:"auto", dayMap:{...DEFAULT_DAY_MAP}, exerciseOverrides:{}, customExercises:{}, removedExerciseIds:{}}, earnedBadges:{}, goals:[]};
 }
 function saveData(){ localStorage.setItem(STORE_KEY, JSON.stringify(DATA)); }
 let DATA = loadData();
 if(!DATA.settings.dayMap) DATA.settings.dayMap = {...DEFAULT_DAY_MAP};
 if(!DATA.settings.exerciseOverrides) DATA.settings.exerciseOverrides = {};
+if(!DATA.settings.customExercises) DATA.settings.customExercises = {};
+if(!DATA.settings.removedExerciseIds) DATA.settings.removedExerciseIds = {};
 if(!DATA.goals) DATA.goals = [];
 
 /* ============================= HELPERS ============================= */
@@ -413,11 +415,66 @@ function effectiveSR(it){
   const sr = ov ? `${sets} x ${reps}${parsed.suffix}` : it.sr;
   return {sr, sets, reps, isTime:parsed.isTime, editable:true, customized:!!ov};
 }
-function itemsFor(plan, weekLetter){
-  return plan.items.filter(it => it.week==="both" || it.week===weekLetter).map(it=>{
+function itemsFor(plan, weekLetter, planSlot){
+  const stock = plan.items.filter(it => it.week==="both" || it.week===weekLetter);
+  const custom = planSlot!=null ? customExercisesFor(planSlot).filter(it => it.week==="both" || it.week===weekLetter) : [];
+  return [...stock, ...custom].filter(it => !isRemoved(it.id)).map(it=>{
     const eff = effectiveSR(it);
-    return {...it, sr:eff.sr, _sets:eff.sets, _reps:eff.reps, _isTime:eff.isTime, _editable:eff.editable, _customized:eff.customized};
+    return {...it, sr:eff.sr, _sets:eff.sets, _reps:eff.reps, _isTime:eff.isTime, _editable:eff.editable, _customized:eff.customized, _custom:!!it.custom};
   });
+}
+/* ============================= ADD/REMOVE EXERCISES ============================= */
+// Custom exercises are stored per PLAN slot (1-6, the workout template key - not the calendar
+// weekday) so they travel along with a day if "swap workout days" later reassigns that template
+// to a different weekday. Removals are soft-deletes of a stock PLAN item's id, so they can be
+// restored later; custom exercises are just deleted outright since the user created them.
+function customExercisesFor(planSlot){
+  return (DATA.settings.customExercises && DATA.settings.customExercises[planSlot]) || [];
+}
+function addCustomExercise(planSlot, ex){
+  if(!DATA.settings.customExercises) DATA.settings.customExercises = {};
+  if(!DATA.settings.customExercises[planSlot]) DATA.settings.customExercises[planSlot] = [];
+  DATA.settings.customExercises[planSlot].push(ex);
+}
+function removeCustomExercise(planSlot, id){
+  const list = DATA.settings.customExercises && DATA.settings.customExercises[planSlot];
+  if(list) DATA.settings.customExercises[planSlot] = list.filter(e=>e.id!==id);
+}
+function isRemoved(id){
+  return !!(DATA.settings.removedExerciseIds && DATA.settings.removedExerciseIds[id]);
+}
+function setRemoved(id, removed){
+  if(!DATA.settings.removedExerciseIds) DATA.settings.removedExerciseIds = {};
+  if(removed) DATA.settings.removedExerciseIds[id] = true;
+  else delete DATA.settings.removedExerciseIds[id];
+}
+function findPlanItemById(id){
+  for(const k in PLAN){
+    const p = PLAN[k];
+    if(!p) continue;
+    const found = p.items.find(it=>it.id===id);
+    if(found) return found;
+  }
+  return null;
+}
+function removedExercisesSummary(){
+  const ids = Object.keys(DATA.settings.removedExerciseIds || {});
+  if(!ids.length) return "";
+  const rows = ids.map(id=>{
+    const found = findPlanItemById(id);
+    const label = found ? found.name : id;
+    return `
+      <div class="settings-row">
+        <div class="lbl" style="font-size:13.5px;font-weight:600;">${label}</div>
+        <button class="btn small ghost" data-restoreex="${id}">Restore</button>
+      </div>`;
+  }).join("");
+  return `
+    <div class="card">
+      <div class="lbl" style="font-weight:800;">Removed exercises</div>
+      <div class="desc" style="margin-top:2px;">Removed from their day's routine. Restore to bring one back.</div>
+      ${rows}
+    </div>`;
 }
 // Rough estimate of total workout time: working time (reps/hold-seconds) + rest between sets
 // for strength items, logged/typical duration for cardio, and a small per-exercise buffer.
@@ -470,6 +527,7 @@ function isGoalComplete(g){ return g.milestones.length>0 && g.milestones.every(m
 let activeTab = "today";
 let historyMonthOffset = 0; // 0 = current month
 let editingExId = null; // id of the exercise currently showing the sets/reps editor on Today
+let addingExercise = false; // whether the "add exercise" form is open on Today
 
 /* ============================= STATS COMPUTATION ============================= */
 function computeStats(){
@@ -596,7 +654,8 @@ function renderToday(){
   const d = todayDate();
   const key = dateKey(d);
   const dow = d.getDay();
-  const plan = PLAN[mappedDow(dow)];
+  const planSlot = mappedDow(dow);
+  const plan = PLAN[planSlot];
   const weekLetter = weekLetterFor(d);
   const log = logFor(key);
   log.dow = dow; log.week = plan && plan.hasAlt ? weekLetter : null;
@@ -626,12 +685,12 @@ function renderToday(){
     return;
   }
 
-  const items = itemsFor(plan, weekLetter);
+  const items = itemsFor(plan, weekLetter, planSlot);
   const doneCount = items.filter(it => log.done[it.id]).length;
   const cardioItems = items.filter(it=>it.type==="cardio");
   const allCardioLogged = cardioItems.every(it => log.cardio && log.cardio[it.id]);
-  const pct = Math.round((doneCount/items.length)*100);
-  const canFinish = doneCount===items.length;
+  const pct = items.length ? Math.round((doneCount/items.length)*100) : 0;
+  const canFinish = items.length>0 && doneCount===items.length;
   const estMin = fmtDurationMin(estimateWorkoutSeconds(items, log));
 
   let html = `
@@ -642,6 +701,10 @@ function renderToday(){
       </div>
       <div style="font-size:12.5px;color:var(--muted);margin:-6px 0 4px;">⏱ Est. duration: ~${estMin} min</div>`;
 
+  if(!items.length){
+    html += `<div style="padding:10px 0;color:var(--muted);font-size:13.5px;">No exercises left for today - add one below, or restore removed ones in Settings.</div>`;
+  }
+
   items.forEach(it=>{
     const isDone = !!log.done[it.id];
     if(it.type==="cardio"){
@@ -650,7 +713,11 @@ function renderToday(){
         <div class="exercise">
           <div class="checkbox ${isDone?'checked':''}"></div>
           <div class="ex-body">
-            <div class="ex-title-row"><span class="ex-name ${isDone?'done':''}">${it.name}</span></div>
+            <div class="ex-title-row">
+              <span class="ex-name ${isDone?'done':''}">${it.name}</span>
+              ${it._custom ? `<span class="badge-week" style="background:var(--gold);">ADDED</span>` : ""}
+              <button class="btn small ghost" data-removeex="${it.id}" style="margin-left:auto;padding:2px 9px;font-size:11px;">✕ Remove</button>
+            </div>
             <div class="ex-sr">${it.sr}</div>
             <div class="ex-notes">${it.notes}</div>
             <div class="cardio-card ${c?'logged':''}" data-cardio="${it.id}">
@@ -700,6 +767,8 @@ function renderToday(){
               <span class="ex-name ${isDone?'done':''}">${it.name}</span>
               ${it.week!=="both" ? `<span class="badge-week ${it.week}">${it.week}</span>` : ""}
               ${it._customized ? `<span class="badge-week" style="background:var(--gold);">CUSTOM</span>` : ""}
+              ${it._custom ? `<span class="badge-week" style="background:var(--gold);">ADDED</span>` : ""}
+              <button class="btn small ghost" data-removeex="${it.id}" style="margin-left:auto;padding:2px 9px;font-size:11px;">✕ Remove</button>
             </div>
             ${srBlock}
             ${it.notes ? `<div class="ex-notes">${it.notes}</div>` : ""}
@@ -708,6 +777,30 @@ function renderToday(){
         </div>`;
     }
   });
+
+  if(addingExercise){
+    html += `
+      <div style="padding-top:12px;border-top:1px solid var(--line);margin-top:4px;">
+        <div class="lbl" style="font-weight:700;font-size:13.5px;margin-bottom:6px;">Add an exercise</div>
+        <div class="field"><label>Name</label><input type="text" id="newExName" placeholder="e.g. Face pulls"></div>
+        <div class="field" style="margin-top:8px;"><label>Sets x reps (optional)</label><input type="text" id="newExSr" placeholder="e.g. 3 x 12"></div>
+        ${plan.hasAlt ? `
+        <div style="margin-top:8px;">
+          <label style="font-size:11px;color:var(--muted);font-weight:600;display:block;margin-bottom:3px;">Applies to</label>
+          <div class="seg" id="newExWeekSeg">
+            <button data-val="both" class="active">Every week</button>
+            <button data-val="A">Week A only</button>
+            <button data-val="B">Week B only</button>
+          </div>
+        </div>` : ""}
+        <div style="display:flex;gap:8px;margin-top:10px;">
+          <button class="btn small" id="saveNewExBtn">Add</button>
+          <button class="btn small ghost" id="cancelNewExBtn">Cancel</button>
+        </div>
+      </div>`;
+  } else {
+    html += `<button class="btn small ghost block" id="addExerciseBtn" style="margin-top:10px;">+ Add exercise</button>`;
+  }
 
   html += `</div>`;
   html += goalExercisesCardHtml(key);
@@ -758,6 +851,56 @@ function renderToday(){
       renderToday();
     };
   });
+  // remove exercise (stock -> soft-deleted/restorable in Settings; added -> deleted outright)
+  view.querySelectorAll("[data-removeex]").forEach(btn=>{
+    btn.onclick = ()=>{
+      const id = btn.getAttribute("data-removeex");
+      const it = items.find(x=>x.id===id);
+      if(!it) return;
+      const msg = it._custom
+        ? `Remove "${it.name}" from this workout?`
+        : `Remove "${it.name}" from this workout? You can restore it later from Settings.`;
+      if(!confirm(msg)) return;
+      if(it._custom) removeCustomExercise(planSlot, id);
+      else setRemoved(id, true);
+      if(editingExId===id) editingExId = null;
+      saveData();
+      renderToday();
+    };
+  });
+  // add exercise
+  const addExerciseBtn = document.getElementById("addExerciseBtn");
+  if(addExerciseBtn){
+    addExerciseBtn.onclick = ()=>{ addingExercise = true; renderToday(); };
+  }
+  const cancelNewExBtn = document.getElementById("cancelNewExBtn");
+  if(cancelNewExBtn){
+    cancelNewExBtn.onclick = ()=>{ addingExercise = false; renderToday(); };
+  }
+  const newExWeekSeg = document.getElementById("newExWeekSeg");
+  if(newExWeekSeg){
+    newExWeekSeg.dataset.selected = "both";
+    newExWeekSeg.querySelectorAll("button").forEach(b=>{
+      b.onclick = ()=>{
+        newExWeekSeg.querySelectorAll("button").forEach(x=>x.classList.remove("active"));
+        b.classList.add("active");
+        newExWeekSeg.dataset.selected = b.getAttribute("data-val");
+      };
+    });
+  }
+  const saveNewExBtn = document.getElementById("saveNewExBtn");
+  if(saveNewExBtn){
+    saveNewExBtn.onclick = ()=>{
+      const name = document.getElementById("newExName").value.trim();
+      const sr = document.getElementById("newExSr").value.trim();
+      if(!name){ alert("Enter an exercise name."); return; }
+      const week = newExWeekSeg ? (newExWeekSeg.dataset.selected || "both") : "both";
+      addCustomExercise(planSlot, {id:uid("custom"), name, sr, notes:"", url:"", week, custom:true});
+      addingExercise = false;
+      saveData();
+      renderToday();
+    };
+  }
   // cardio seg buttons
   view.querySelectorAll("[data-cardiotype]").forEach(seg=>{
     const id = seg.getAttribute("data-cardiotype");
@@ -945,7 +1088,8 @@ function showDayModal(key){
   const log = DATA.logs[key];
   const d = new Date(key+"T00:00:00");
   const dow = d.getDay();
-  const plan = PLAN[mappedDow(dow)];
+  const planSlot = mappedDow(dow);
+  const plan = PLAN[planSlot];
   const isFuture = d > todayDate();
   const root = document.getElementById("modalRoot");
   let body = "";
@@ -960,7 +1104,7 @@ function showDayModal(key){
     }
   } else if(plan){
     const weekLetter = (log && log.week) || weekLetterFor(d);
-    const items = itemsFor(plan, weekLetter);
+    const items = itemsFor(plan, weekLetter, planSlot);
     if(plan.hasAlt) weekBadge = `<span class="badge-week ${weekLetter}" style="margin-left:8px;">WEEK ${weekLetter}</span>`;
 
     if(log){
@@ -1336,6 +1480,8 @@ function renderSettings(){
       ${isDayMapDefault() ? "" : `<button class="btn small ghost" id="resetDaysBtn" style="margin-top:8px;">Restore original day order</button>`}
     </div>
 
+    ${removedExercisesSummary()}
+
     <div class="card">
       <div class="settings-row">
         <div>
@@ -1402,6 +1548,13 @@ function renderSettings(){
       renderSettings();
     };
   }
+  view.querySelectorAll("[data-restoreex]").forEach(btn=>{
+    btn.onclick = ()=>{
+      setRemoved(btn.getAttribute("data-restoreex"), false);
+      saveData();
+      renderSettings();
+    };
+  });
   document.getElementById("exportBtn").onclick = async ()=>{
     const blob = new Blob([JSON.stringify(DATA,null,2)], {type:"application/json"});
     const fileName = "workout-data-backup-"+dateKey(todayDate())+".json";
@@ -1468,7 +1621,7 @@ function renderSettings(){
 /* ============================= TAB SWITCHING ============================= */
 function renderTab(tab){
   activeTab = tab;
-  if(tab!=="today") editingExId = null;
+  if(tab!=="today"){ editingExId = null; addingExercise = false; }
   document.querySelectorAll("nav.tabbar button").forEach(b=>{
     b.classList.toggle("active", b.getAttribute("data-tab")===tab);
   });
