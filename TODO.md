@@ -46,6 +46,11 @@ same as prior work. Check items off as they land.
 - [ ] Scheduling entry point inside `showDayModal` for other dates
 - [ ] `showDayModal` renders the special-day template/log instead of the
       normal exercise list when one is scheduled/logged for that date
+- [ ] Month calendar grid (`renderHistory` / `.cal-cell`): show a small ⚡
+      marker on any day with `log.specialDayId` set, so special training
+      days are visible at a glance when scanning past months
+- [ ] Decide + implement whether scheduled-but-not-yet-completed future
+      special days also get a (dimmer) bolt in the month view
 
 **Settings / management**
 - [ ] New "Special Training Days" card: list + "+ New special training

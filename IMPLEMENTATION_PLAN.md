@@ -102,6 +102,31 @@ for that date. If a date already has a scheduled or completed special day,
 `showDayModal` should render the template/log's title + description +
 (if completed) notes and activities instead of the normal exercise list.
 
+### Month grid indicator (`renderHistory`)
+
+The month calendar (`renderHistory`, the `.cal-cell` grid) currently only
+colors each day's cell by status — `done`/`rest`/`missed`/`future`, plus a
+`today` outline — and renders nothing but the day number inside. Add a
+small ⚡ marker on any past/current day whose log has `log.specialDayId`
+set, so a special training day is visually distinguishable at a glance
+when scanning history:
+
+- Check `log && log.specialDayId` alongside the existing `cls` logic
+  (`index.html` around the `if(d > today) cls = "future"; else if
+  (dow===0) cls = "rest"; else if(log && log.fullyCompleted) cls = "done";
+  ...` block) and add an `is-special` flag independent of `cls` (a special
+  day can still be `done` or `missed`).
+- Render the bolt as a small overlay (e.g. an absolutely-positioned `⚡`
+  in a corner of the cell) rather than replacing the day number — the cell
+  is a tight `aspect-ratio:1` box, so this needs a new small CSS rule
+  (something like `.cal-cell .special-mark{position:absolute; top:1px;
+  right:2px; font-size:9px;}` with `.cal-cell` given `position:relative`).
+- Decide whether to also mark **future** scheduled-but-not-yet-completed
+  special days (recommend yes, so you can see what's coming up in the
+  month view too — just keep the bolt's color/opacity distinct from a
+  completed one, e.g. full-opacity once done, dimmer while only
+  scheduled).
+
 ### Management UI (Settings)
 
 New Settings card, "Special Training Days": list of created templates
