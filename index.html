@@ -324,7 +324,7 @@ function loadData(){
     const raw = localStorage.getItem(STORE_KEY);
     if(raw) return JSON.parse(raw);
   }catch(e){}
-  return {logs:{}, settings:{weekOverride:"auto", dayMap:{...DEFAULT_DAY_MAP}, exerciseOverrides:{}, customExercises:{}, removedExerciseIds:{}}, earnedBadges:{}, goals:[]};
+  return {logs:{}, settings:{weekOverride:"auto", dayMap:{...DEFAULT_DAY_MAP}, exerciseOverrides:{}, customExercises:{}, removedExerciseIds:{}, weightTracking:{}}, earnedBadges:{}, goals:[]};
 }
 function saveData(){ localStorage.setItem(STORE_KEY, JSON.stringify(DATA)); }
 let DATA = loadData();
@@ -332,6 +332,7 @@ if(!DATA.settings.dayMap) DATA.settings.dayMap = {...DEFAULT_DAY_MAP};
 if(!DATA.settings.exerciseOverrides) DATA.settings.exerciseOverrides = {};
 if(!DATA.settings.customExercises) DATA.settings.customExercises = {};
 if(!DATA.settings.removedExerciseIds) DATA.settings.removedExerciseIds = {};
+if(!DATA.settings.weightTracking) DATA.settings.weightTracking = {};
 if(!DATA.goals) DATA.goals = [];
 
 /* ============================= HELPERS ============================= */
@@ -397,9 +398,11 @@ function parseSR(sr){
 function exerciseOverride(id){
   return (DATA.settings.exerciseOverrides || {})[id] || null;
 }
-function setExerciseOverride(id, sets, reps){
+// Merges `patch` (any of {sets, reps, weight}) into an exercise's stored override, leaving
+// fields the caller didn't touch as they were.
+function setExerciseOverride(id, patch){
   if(!DATA.settings.exerciseOverrides) DATA.settings.exerciseOverrides = {};
-  DATA.settings.exerciseOverrides[id] = {sets, reps};
+  DATA.settings.exerciseOverrides[id] = {...(DATA.settings.exerciseOverrides[id]||{}), ...patch};
 }
 function clearExerciseOverride(id){
   if(DATA.settings.exerciseOverrides) delete DATA.settings.exerciseOverrides[id];
@@ -410,18 +413,65 @@ function effectiveSR(it){
   const parsed = parseSR(it.sr);
   if(!parsed) return {sr:it.sr, sets:null, reps:null, isTime:false, editable:false, customized:false};
   const ov = exerciseOverride(it.id);
-  const sets = ov ? ov.sets : parsed.sets;
-  const reps = ov ? ov.reps : parsed.reps;
-  const sr = ov ? `${sets} x ${reps}${parsed.suffix}` : it.sr;
-  return {sr, sets, reps, isTime:parsed.isTime, editable:true, customized:!!ov};
+  const sets = (ov && ov.sets!=null) ? ov.sets : parsed.sets;
+  const reps = (ov && ov.reps!=null) ? ov.reps : parsed.reps;
+  const customized = !!(ov && ov.sets!=null);
+  const sr = customized ? `${sets} x ${reps}${parsed.suffix}` : it.sr;
+  return {sr, sets, reps, isTime:parsed.isTime, editable:true, customized};
+}
+// Pulls a "<number> lb" weight out of an exercise's name, e.g. "Dumbbell curl (10 lb)".
+function parseWeight(name){
+  const m = name.match(/(\d+(?:\.\d+)?)\s*lb\b/i);
+  if(!m) return null;
+  return {weight: parseFloat(m[1])};
+}
+function effectiveWeight(it){
+  const parsed = parseWeight(it.name);
+  if(!parsed) return {weight:null, editable:false, customized:false};
+  const ov = exerciseOverride(it.id);
+  const customized = !!(ov && ov.weight!=null);
+  const weight = customized ? ov.weight : parsed.weight;
+  return {weight, editable:true, customized};
+}
+// Substitutes the effective weight into the exercise name, keeping everything else
+// (parens, "dumbbells optional", etc.) exactly as written.
+function nameWithWeight(name, weight){
+  return name.replace(/(\d+(?:\.\d+)?)(\s*lb\b)/i, (m, num, rest) => weight + rest);
 }
 function itemsFor(plan, weekLetter, planSlot){
   const stock = plan.items.filter(it => it.week==="both" || it.week===weekLetter);
   const custom = planSlot!=null ? customExercisesFor(planSlot).filter(it => it.week==="both" || it.week===weekLetter) : [];
   return [...stock, ...custom].filter(it => !isRemoved(it.id)).map(it=>{
     const eff = effectiveSR(it);
-    return {...it, sr:eff.sr, _sets:eff.sets, _reps:eff.reps, _isTime:eff.isTime, _editable:eff.editable, _customized:eff.customized, _custom:!!it.custom};
+    const effW = effectiveWeight(it);
+    const name = effW.weight!=null ? nameWithWeight(it.name, effW.weight) : it.name;
+    const merged = {...it, name, sr:eff.sr, _sets:eff.sets, _reps:eff.reps, _isTime:eff.isTime,
+      _editable:eff.editable, _customized:eff.customized || effW.customized, _custom:!!it.custom,
+      _weight:effW.weight, _weightEditable:effW.editable, _weightCustomized:effW.customized};
+    merged._progressionDue = progressionReminderDue(merged);
+    return merged;
   });
+}
+/* ============================= WEIGHT PROGRESSION TRACKING ============================= */
+// Tracks, per exercise id, the weight last logged as completed and the date that weight was
+// first used. A small on-screen nudge appears once you've been training at the same weight
+// for 2+ weeks, in case it's time to add weight or reps. The clock is driven purely by actual
+// completions (not by just setting an override), so it reflects real training time.
+function updateWeightTracking(id, weight, dateStr){
+  if(weight==null) return;
+  if(!DATA.settings.weightTracking) DATA.settings.weightTracking = {};
+  const t = DATA.settings.weightTracking[id];
+  if(!t || t.weight !== weight){
+    DATA.settings.weightTracking[id] = {weight, since: dateStr};
+  }
+}
+function progressionReminderDue(it){
+  if(it._weight==null) return false;
+  const t = DATA.settings.weightTracking && DATA.settings.weightTracking[it.id];
+  if(!t || t.weight !== it._weight) return false;
+  const since = new Date(t.since+"T00:00:00");
+  const days = Math.floor((todayDate() - since) / 86400000);
+  return days >= 14;
 }
 /* ============================= ADD/REMOVE EXERCISES ============================= */
 // Custom exercises are stored per PLAN slot (1-6, the workout template key - not the calendar
@@ -510,7 +560,8 @@ function estimateWorkoutSeconds(items, log){
 }
 function fmtDurationMin(sec){ return Math.max(1, Math.round(sec/60)); }
 function logFor(dateStr){
-  if(!DATA.logs[dateStr]) DATA.logs[dateStr] = {done:{}, cardio:null, fullyCompleted:false, week:null, dow:null};
+  if(!DATA.logs[dateStr]) DATA.logs[dateStr] = {done:{}, cardio:null, fullyCompleted:false, week:null, dow:null, exerciseSnapshots:{}};
+  if(!DATA.logs[dateStr].exerciseSnapshots) DATA.logs[dateStr].exerciseSnapshots = {};
   return DATA.logs[dateStr];
 }
 function milesFromEntry(c){
@@ -744,20 +795,25 @@ function renderToday(){
         </div>`;
     } else {
       const isEditing = editingExId === it.id;
+      const canEdit = it._editable || it._weightEditable;
       let srBlock;
       if(isEditing){
         srBlock = `
+          ${it._editable ? `
           <div class="row2" style="margin-top:6px;">
             <div class="field"><label>Sets</label><input type="number" inputmode="numeric" min="1" max="20" id="sets_${it.id}" value="${it._sets}"></div>
             <div class="field"><label>${it._isTime ? "Seconds/set" : "Reps"}</label><input type="number" inputmode="numeric" min="1" max="200" id="reps_${it.id}" value="${it._reps}"></div>
-          </div>
+          </div>` : ``}
+          ${it._weightEditable ? `
+          <div class="field" style="margin-top:8px;"><label>Weight (lb)</label><input type="number" inputmode="decimal" min="0" step="0.5" id="weight_${it.id}" value="${it._weight}"></div>` : ``}
           <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;">
             <button class="btn small" data-saveex="${it.id}">Save</button>
             <button class="btn small ghost" data-cancelex="${it.id}">Cancel</button>
             ${it._customized ? `<button class="btn small ghost" data-resetex="${it.id}">Reset to default</button>` : ""}
           </div>`;
       } else {
-        srBlock = `<div class="ex-sr">${it.sr}${it._editable ? ` <button class="btn small ghost" data-editex="${it.id}" style="margin-left:4px;padding:2px 9px;font-size:11px;">Edit</button>` : ""}</div>`;
+        srBlock = `<div class="ex-sr">${it.sr}${canEdit ? ` <button class="btn small ghost" data-editex="${it.id}" style="margin-left:4px;padding:2px 9px;font-size:11px;">Edit</button>` : ""}</div>
+          ${it._progressionDue ? `<div style="font-size:11.5px;color:#9A7B1F;margin-top:3px;">💡 Same weight 2+ weeks — maybe bump it up if it's getting easy.</div>` : ""}`;
       }
       html += `
         <div class="exercise" data-ex="${it.id}">
@@ -814,6 +870,13 @@ function renderToday(){
     row.querySelector(".checkbox").onclick = ()=>{
       const id = row.getAttribute("data-ex");
       log.done[id] = !log.done[id];
+      if(log.done[id]){
+        const it = items.find(x=>x.id===id);
+        if(it){
+          log.exerciseSnapshots[id] = {name:it.name, sr:it.sr, sets:it._sets, reps:it._reps, weight:it._weight};
+          updateWeightTracking(id, it._weight, key);
+        }
+      }
       saveData();
       renderToday();
     };
@@ -842,10 +905,20 @@ function renderToday(){
   view.querySelectorAll("[data-saveex]").forEach(btn=>{
     btn.onclick = ()=>{
       const id = btn.getAttribute("data-saveex");
-      const sets = parseInt(document.getElementById("sets_"+id).value, 10);
-      const reps = parseInt(document.getElementById("reps_"+id).value, 10);
-      if(!sets || sets<1 || !reps || reps<1){ alert("Enter a valid number of sets and reps."); return; }
-      setExerciseOverride(id, sets, reps);
+      const it = items.find(x=>x.id===id);
+      const patch = {};
+      if(it._editable){
+        const sets = parseInt(document.getElementById("sets_"+id).value, 10);
+        const reps = parseInt(document.getElementById("reps_"+id).value, 10);
+        if(!sets || sets<1 || !reps || reps<1){ alert("Enter a valid number of sets and reps."); return; }
+        patch.sets = sets; patch.reps = reps;
+      }
+      if(it._weightEditable){
+        const weight = parseFloat(document.getElementById("weight_"+id).value);
+        if(!(weight>=0)){ alert("Enter a valid weight."); return; }
+        patch.weight = weight;
+      }
+      setExerciseOverride(id, patch);
       editingExId = null;
       saveData();
       renderToday();
@@ -1108,15 +1181,20 @@ function showDayModal(key){
     if(plan.hasAlt) weekBadge = `<span class="badge-week ${weekLetter}" style="margin-left:8px;">WEEK ${weekLetter}</span>`;
 
     if(log){
-      // already logged / in progress - show real status
+      // already logged / in progress - show what was actually done, frozen at completion time
+      // (so a later weight/reps change doesn't rewrite history)
       body = items.map(it=>{
         const done = !!log.done[it.id];
+        const snap = log.exerciseSnapshots && log.exerciseSnapshots[it.id];
+        const displayName = (done && snap) ? snap.name : it.name;
         let extra = "";
         if(it.type==="cardio" && log.cardio && log.cardio[it.id]){
           const c = log.cardio[it.id];
           extra = ` — ${c.type}, ${c.distance}${c.unit}, ${c.duration}min`;
+        } else if(done && snap && snap.sr){
+          extra = ` — ${snap.sr}`;
         }
-        return `<div class="item"><span>${it.name}${extra}</span><span>${done?'✅':'—'}</span></div>`;
+        return `<div class="item"><span>${displayName}${extra}</span><span>${done?'✅':'—'}</span></div>`;
       }).join("");
       body += `<div class="item"><b>Status</b><b>${log.fullyCompleted?'Completed ✅':'Incomplete'}</b></div>`;
     } else if(isFuture){
