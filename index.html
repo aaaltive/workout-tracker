@@ -319,12 +319,13 @@ const PLANCHE_GOAL_TEMPLATE = {
 /* ============================= STORAGE ============================= */
 const STORE_KEY = "calisthenicsPlanData_v1";
 const DEFAULT_DAY_MAP = {1:1,2:2,3:3,4:4,5:5,6:6};
+const DEFAULT_WEEK_CYCLE = {count:2, keys:["A","B"], names:{A:"A",B:"B"}, override:"auto"};
 function loadData(){
   try{
     const raw = localStorage.getItem(STORE_KEY);
     if(raw) return JSON.parse(raw);
   }catch(e){}
-  return {logs:{}, settings:{weekOverride:"auto", dayMap:{...DEFAULT_DAY_MAP}, exerciseOverrides:{}, customExercises:{}, removedExerciseIds:{}, weightTracking:{}}, earnedBadges:{}, goals:[]};
+  return {logs:{}, settings:{dayMap:{...DEFAULT_DAY_MAP}, exerciseOverrides:{}, customExercises:{}, removedExerciseIds:{}, weightTracking:{}, weekCycle:{count:2, keys:["A","B"], names:{A:"A",B:"B"}, override:"auto"}}, earnedBadges:{}, goals:[]};
 }
 function saveData(){ localStorage.setItem(STORE_KEY, JSON.stringify(DATA)); }
 let DATA = loadData();
@@ -333,6 +334,11 @@ if(!DATA.settings.exerciseOverrides) DATA.settings.exerciseOverrides = {};
 if(!DATA.settings.customExercises) DATA.settings.customExercises = {};
 if(!DATA.settings.removedExerciseIds) DATA.settings.removedExerciseIds = {};
 if(!DATA.settings.weightTracking) DATA.settings.weightTracking = {};
+if(!DATA.settings.weekCycle || !Array.isArray(DATA.settings.weekCycle.keys) || DATA.settings.weekCycle.keys.length < 1){
+  DATA.settings.weekCycle = {count:2, keys:["A","B"], names:{A:"A",B:"B"}, override:"auto"};
+}
+if(!DATA.settings.weekCycle.names) DATA.settings.weekCycle.names = {};
+if(DATA.settings.weekCycle.count !== DATA.settings.weekCycle.keys.length) DATA.settings.weekCycle.count = DATA.settings.weekCycle.keys.length;
 if(!DATA.goals) DATA.goals = [];
 
 /* ============================= HELPERS ============================= */
@@ -347,9 +353,93 @@ function getWeekNumber(d){
   const yearStart = new Date(Date.UTC(dt.getUTCFullYear(),0,1));
   return Math.ceil((((dt-yearStart)/86400000)+1)/7);
 }
-function weekLetterFor(d){
-  if(DATA.settings.weekOverride && DATA.settings.weekOverride!=="auto") return DATA.settings.weekOverride;
-  return (getWeekNumber(d) % 2 === 0) ? "A" : "B";
+// A handful of distinct accent colors for week badges, keyed by position in
+// the cycle (not by display name, since those are free-form and can't
+// safely be used as CSS class names - e.g. "Week 3" contains a space).
+// First two match the original --weekA/--weekB hex values exactly, so a
+// fresh install (or an unchanged A/B cycle) looks identical to before.
+const WEEK_COLORS = ["#F6A24A", "#4A90D9", "#8E6FD1", "#3FB372", "#D96B9A", "#56C2C0"];
+// weekCycle().keys are STABLE identifiers used for all `week:` tag matching
+// (on PLAN items and custom exercises) - they're generated once and never
+// change. weekCycle().names maps each key to the user-facing, freely
+// renameable display text. Keeping these separate means renaming a week
+// never breaks its link to the stock plan's hardcoded "A"/"B" tags or to
+// any exercise already tagged with that key.
+function weekCycle(){ return DATA.settings.weekCycle || DEFAULT_WEEK_CYCLE; }
+function weekName(key){ const wc = weekCycle(); return (wc.names && wc.names[key]) || key; }
+function weekColor(key){
+  const idx = weekCycle().keys.indexOf(key);
+  return WEEK_COLORS[idx>=0 ? idx % WEEK_COLORS.length : 0];
+}
+function weekLabelFor(d){
+  const wc = weekCycle();
+  if(wc.override && wc.override!=="auto" && wc.keys.includes(wc.override)) return wc.override;
+  return wc.keys[getWeekNumber(d) % wc.count];
+}
+function isWeekCycleDefault(){
+  const wc = weekCycle();
+  return wc.count===2 && wc.keys.length===2 && wc.keys[0]==="A" && wc.keys[1]==="B";
+}
+function renameWeek(key, newName){
+  const wc = weekCycle();
+  if(!wc.names) wc.names = {};
+  wc.names[key] = newName;
+}
+// Adds one more week to the end of the cycle, seeded as an exact copy of
+// the week from two slots back (so e.g. a 3rd week copies week 1, a 4th
+// copies week 2) per how the user wants new weeks to start - as a full
+// clone to edit from, not an empty "every week only" week. Falls back to
+// copying the most recent week if there's no "two back" week yet. The new
+// week's key is a fresh uid (never reused), so removing and re-adding
+// weeks can't accidentally collide with orphaned data from an earlier key.
+function addWeekToCycle(){
+  const wc = weekCycle();
+  const oldCount = wc.count;
+  const sourceIdx = oldCount - 2;
+  const sourceKey = wc.keys[sourceIdx >= 0 ? sourceIdx : oldCount-1];
+  const newKey = uid("wk");
+  wc.keys.push(newKey);
+  wc.count = wc.keys.length;
+  if(!wc.names) wc.names = {};
+  wc.names[newKey] = "Week " + (oldCount+1);
+  seedWeekFromSource(newKey, sourceKey);
+}
+// Removes the most recently added week from the cycle. Any exercises the
+// user had added to that week are left in storage (not deleted) - they
+// just stop appearing, the same way shrinking the day map or removing an
+// exercise never destroys data, only hides it. Re-adding a week later
+// never revives them, since a fresh unique key is always generated.
+function removeLastWeekFromCycle(){
+  const wc = weekCycle();
+  if(wc.count <= 1) return;
+  const removedKey = wc.keys.pop();
+  wc.count = wc.keys.length;
+  if(wc.override===removedKey) wc.override = "auto";
+  if(wc.names) delete wc.names[removedKey];
+}
+function resetWeekCycle(){
+  DATA.settings.weekCycle = {count:2, keys:["A","B"], names:{A:"A",B:"B"}, override:"auto"};
+}
+// Clones every exercise specific to `sourceKey` (stock plan items and any
+// already-added custom ones) into `newKey`, for every weekday. Items
+// tagged "both" aren't cloned - they already show on every week, including
+// the new one, with no copy needed. Clones use each item's current
+// *effective* sets/reps/weight (including any overrides), baked directly
+// into the clone's name/sr text, so the new week starts as an independent
+// snapshot - editing the clone later never touches the original week.
+function seedWeekFromSource(newKey, sourceKey){
+  for(let dow=1; dow<=6; dow++){
+    const plan = PLAN[dow];
+    if(!plan) continue;
+    const stockSource = plan.items.filter(it => it.week===sourceKey && !isRemoved(it.id));
+    const customSource = customExercisesFor(dow).filter(it => it.week===sourceKey && !isRemoved(it.id));
+    [...stockSource, ...customSource].forEach(it=>{
+      const effW = effectiveWeight(it);
+      const name = effW.weight!=null ? nameWithWeight(it.name, effW.weight) : it.name;
+      const eff = effectiveSR(it);
+      addCustomExercise(dow, {id:uid("wk"), name, sr:eff.sr, notes:it.notes||"", url:it.url||"", week:newKey, custom:true});
+    });
+  }
 }
 const DOW_NAMES = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
 const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
@@ -438,9 +528,9 @@ function effectiveWeight(it){
 function nameWithWeight(name, weight){
   return name.replace(/(\d+(?:\.\d+)?)(\s*lb\b)/i, (m, num, rest) => weight + rest);
 }
-function itemsFor(plan, weekLetter, planSlot){
-  const stock = plan.items.filter(it => it.week==="both" || it.week===weekLetter);
-  const custom = planSlot!=null ? customExercisesFor(planSlot).filter(it => it.week==="both" || it.week===weekLetter) : [];
+function itemsFor(plan, weekKey, planSlot){
+  const stock = plan.items.filter(it => it.week==="both" || it.week===weekKey);
+  const custom = planSlot!=null ? customExercisesFor(planSlot).filter(it => it.week==="both" || it.week===weekKey) : [];
   return [...stock, ...custom].filter(it => !isRemoved(it.id)).map(it=>{
     const eff = effectiveSR(it);
     const effW = effectiveWeight(it);
@@ -707,14 +797,14 @@ function renderToday(){
   const dow = d.getDay();
   const planSlot = mappedDow(dow);
   const plan = PLAN[planSlot];
-  const weekLetter = weekLetterFor(d);
+  const weekLabel = weekLabelFor(d);
   const log = logFor(key);
-  log.dow = dow; log.week = plan && plan.hasAlt ? weekLetter : null;
+  log.dow = dow; log.week = plan && plan.hasAlt ? weekLabel : null;
 
   document.getElementById("hdrTitle").innerHTML = `<h1>${DOW_NAMES[dow]}</h1>`;
   const dstr = `${MONTH_NAMES[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
   document.getElementById("hdrSub").textContent = plan ? (plan.title + (plan.subtitle? " · "+plan.subtitle : "")) + " · " + dstr : "Rest Day · " + dstr;
-  document.getElementById("hdrWeekPill").innerHTML = (plan && plan.hasAlt) ? `<span class="weekpill">WEEK ${weekLetter}</span>` : "";
+  document.getElementById("hdrWeekPill").innerHTML = (plan && plan.hasAlt) ? `<span class="weekpill">WEEK ${weekName(weekLabel)}</span>` : "";
 
   const view = document.getElementById("view");
 
@@ -736,7 +826,7 @@ function renderToday(){
     return;
   }
 
-  const items = itemsFor(plan, weekLetter, planSlot);
+  const items = itemsFor(plan, weekLabel, planSlot);
   const doneCount = items.filter(it => log.done[it.id]).length;
   const cardioItems = items.filter(it=>it.type==="cardio");
   const allCardioLogged = cardioItems.every(it => log.cardio && log.cardio[it.id]);
@@ -821,7 +911,7 @@ function renderToday(){
           <div class="ex-body">
             <div class="ex-title-row">
               <span class="ex-name ${isDone?'done':''}">${it.name}</span>
-              ${it.week!=="both" ? `<span class="badge-week ${it.week}">${it.week}</span>` : ""}
+              ${it.week!=="both" ? `<span class="badge-week" style="background:${weekColor(it.week)};">${weekName(it.week)}</span>` : ""}
               ${it._customized ? `<span class="badge-week" style="background:var(--gold);">CUSTOM</span>` : ""}
               ${it._custom ? `<span class="badge-week" style="background:var(--gold);">ADDED</span>` : ""}
               <button class="btn small ghost" data-removeex="${it.id}" style="margin-left:auto;padding:2px 9px;font-size:11px;">✕ Remove</button>
@@ -843,10 +933,9 @@ function renderToday(){
         ${plan.hasAlt ? `
         <div style="margin-top:8px;">
           <label style="font-size:11px;color:var(--muted);font-weight:600;display:block;margin-bottom:3px;">Applies to</label>
-          <div class="seg" id="newExWeekSeg">
+          <div class="seg" id="newExWeekSeg" style="flex-wrap:wrap;">
             <button data-val="both" class="active">Every week</button>
-            <button data-val="A">Week A only</button>
-            <button data-val="B">Week B only</button>
+            ${weekCycle().keys.map(k=>`<button data-val="${k}">${weekName(k)} only</button>`).join("")}
           </div>
         </div>` : ""}
         <div style="display:flex;gap:8px;margin-top:10px;">
@@ -1176,9 +1265,9 @@ function showDayModal(key){
       body = `<p style="color:var(--muted);font-size:13.5px;">${isFuture ? "Rest day - nothing scheduled." : "Nothing logged for this day."}</p>`;
     }
   } else if(plan){
-    const weekLetter = (log && log.week) || weekLetterFor(d);
-    const items = itemsFor(plan, weekLetter, planSlot);
-    if(plan.hasAlt) weekBadge = `<span class="badge-week ${weekLetter}" style="margin-left:8px;">WEEK ${weekLetter}</span>`;
+    const weekLabel = (log && log.week) || weekLabelFor(d);
+    const items = itemsFor(plan, weekLabel, planSlot);
+    if(plan.hasAlt) weekBadge = `<span class="badge-week" style="margin-left:8px;background:${weekColor(weekLabel)};">WEEK ${weekName(weekLabel)}</span>`;
 
     if(log){
       // already logged / in progress - show what was actually done, frozen at completion time
@@ -1506,7 +1595,7 @@ function renderSettings(){
   document.getElementById("hdrWeekPill").innerHTML = "";
 
   const view = document.getElementById("view");
-  const wo = DATA.settings.weekOverride || "auto";
+  const wc = weekCycle();
   const stats = computeStats();
   const lastBackupAt = DATA.settings.lastBackupAt || null;
   const daysSinceBackup = lastBackupAt ? Math.floor((Date.now()-lastBackupAt)/86400000) : null;
@@ -1525,14 +1614,31 @@ function renderSettings(){
     <div class="card">
       <div class="settings-row">
         <div>
-          <div class="lbl">Week A / B rotation</div>
-          <div class="desc">Auto switches every calendar week. Force a week if it ever gets out of sync.</div>
+          <div class="lbl">Training week cycle</div>
+          <div class="desc">Auto rotates through your weeks every calendar week. Force one if it ever gets out of sync.</div>
         </div>
       </div>
-      <div class="seg" id="weekSeg" style="margin-top:4px;">
-        <button data-val="auto" class="${wo==='auto'?'active':''}">Auto</button>
-        <button data-val="A" class="${wo==='A'?'active':''}">Force A</button>
-        <button data-val="B" class="${wo==='B'?'active':''}">Force B</button>
+      <div class="seg" id="weekSeg" style="margin-top:4px;flex-wrap:wrap;">
+        <button data-val="auto" class="${wc.override==='auto'?'active':''}">Auto</button>
+        ${wc.keys.map(k=>`<button data-val="${k}" class="${wc.override===k?'active':''}">Force ${weekName(k)}</button>`).join("")}
+      </div>
+
+      <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line);">
+        <div class="lbl" style="font-size:13.5px;font-weight:700;">Weeks in rotation</div>
+        ${wc.keys.map((k,i)=>`
+          <div class="row2" style="margin-top:8px;align-items:center;">
+            <span class="badge-week" style="background:${weekColor(k)};flex:0 0 auto;">${i+1}</span>
+            <div class="field"><input type="text" data-weekname="${k}" value="${weekName(k)}"></div>
+          </div>`).join("")}
+        <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;">
+          <button class="btn small ghost" id="addWeekBtn">+ Add a week</button>
+          ${wc.count>1 ? `<button class="btn small ghost" id="removeWeekBtn">− Remove last week</button>` : ""}
+        </div>
+        <div style="font-size:11.5px;color:var(--muted);margin-top:8px;line-height:1.5;">
+          A new week is seeded as a full copy of an earlier week's exercises, ready to edit from there -
+          it won't start empty.
+        </div>
+        ${!isWeekCycleDefault() ? `<button class="btn small ghost" id="resetWeekCycleBtn" style="margin-top:8px;">Restore 2-week A/B cycle</button>` : ""}
       </div>
     </div>
 
@@ -1600,11 +1706,43 @@ function renderSettings(){
 
   document.getElementById("weekSeg").querySelectorAll("button").forEach(b=>{
     b.onclick = ()=>{
-      DATA.settings.weekOverride = b.getAttribute("data-val");
+      weekCycle().override = b.getAttribute("data-val");
       saveData();
       renderSettings();
     };
   });
+  view.querySelectorAll("[data-weekname]").forEach(input=>{
+    input.onchange = ()=>{
+      const name = input.value.trim();
+      if(name) renameWeek(input.getAttribute("data-weekname"), name);
+      saveData();
+      renderSettings();
+    };
+  });
+  document.getElementById("addWeekBtn").onclick = ()=>{
+    addWeekToCycle();
+    saveData();
+    renderSettings();
+    showSimpleToast("Week added", "New week seeded from an earlier week's exercises - rename and edit it below, or on Today once it's active.");
+  };
+  const removeWeekBtn = document.getElementById("removeWeekBtn");
+  if(removeWeekBtn){
+    removeWeekBtn.onclick = ()=>{
+      if(!confirm("Remove the last week from the rotation? Any exercises you added to it won't be deleted, but they'll stop appearing.")) return;
+      removeLastWeekFromCycle();
+      saveData();
+      renderSettings();
+    };
+  }
+  const resetWeekCycleBtn = document.getElementById("resetWeekCycleBtn");
+  if(resetWeekCycleBtn){
+    resetWeekCycleBtn.onclick = ()=>{
+      if(!confirm("Restore the original 2-week A/B cycle? Weeks beyond A/B will stop appearing (their exercises aren't deleted).")) return;
+      resetWeekCycle();
+      saveData();
+      renderSettings();
+    };
+  }
   document.getElementById("swapDaysBtn").onclick = ()=>{
     const a = parseInt(document.getElementById("swapDayA").value, 10);
     const b = parseInt(document.getElementById("swapDayB").value, 10);
