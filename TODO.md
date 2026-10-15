@@ -260,3 +260,47 @@ total up from the original 18).
 - [x] History (`showDayModal`) shows all entries for a day, not just one
 - [x] Regression: all tabs render with no errors, both mocked and
       real-clock dates
+
+## 4. Follow-up requests (post-launch) — ✅ Shipped
+
+Smaller requests that came out of hands-on testing of the three features
+above, each on its own branch, merged back here.
+
+**Add-exercise week-scope options** (`claude/add-exercise-scope-options`)
+- [x] The "+ Add exercise" week-selector now shows on every day (previously
+      only on `hasAlt:true` days), with a new **"Just today"** option
+      alongside Every week/A only/B only
+- [x] One-time exercises are stored in `log.oneTimeExercises` (frozen to
+      that date, not `settings.customExercises[planSlot]`), so they never
+      recur on future weeks
+- [x] `oneTimeExercisesFor`/`addOneTimeExercise`/`removeOneTimeExercise`/
+      `oneTimeItemsFor` helpers; counted in progress/duration; shown with a
+      "ONE-TIME" badge instead of "ADDED"; visible in `showDayModal` history
+- [x] Tested: selector appears on a `hasAlt:false` day, one-time item
+      doesn't appear on a future occurrence of that day, counts toward
+      progress, hard-deletes cleanly, "Every week"/week-specific options
+      still work (regression)
+
+**Per-week day swap** (`claude/per-week-swap`)
+- [x] Settings "Swap workout days" card gained a week selector so the same
+      swap mechanic (already shipped) could target week 3+, not just A/B
+- [x] Tested: swap in one week doesn't affect another; "Restore original
+      day order" scoped to the viewed week; regression on A/B swap + legacy
+      single-`dayMap` migration
+
+**Cross-week day swap** (`claude/cross-week-day-swap`)
+- [x] Generalized further so the two sides of a swap can belong to
+      *different* weeks (e.g. Monday of Week 2 with Wednesday of Week 3),
+      not just within one week — per the user's explicit example
+- [x] Settings card now shows two independent Week+Day pickers ("Day A" /
+      "Day B") instead of one week selector driving both sides; the
+      "Current order for" viewing/reset section is unchanged
+- [x] No new data model — both sides read/write their own
+      `dayMapForWeek(weekKey)` and exchange plan-slot values; same-week
+      swaps (`weekA === weekB`) handled as one map mutation so neither
+      side's change is lost
+- [x] Tested: same-week swap still works exactly as before (regression);
+      the user's literal example (Week B Monday ↔ Week 3 Wednesday)
+      verified both in the stored day-map and via an actual render showing
+      the swapped content; no-op guard for swapping a cell with itself;
+      full tab-render regression

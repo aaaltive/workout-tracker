@@ -404,3 +404,24 @@ the sets/reps, add/remove, and weight-tracking features already merged:
    regression testing against the existing A/B behavior. Do this last, and
    confirm the "no auto-generated content" caveat with the user before
    starting.
+
+---
+
+## 4. Follow-up requests (post-launch) — ✅ Shipped
+
+Three smaller requests surfaced while the user tested the branch above,
+each shipped on its own branch and merged back in (see `TODO.md` section 4
+for the full checklist per feature):
+
+- **Add-exercise week-scope options** — the "+ Add exercise" selector now
+  appears on every day (not just `hasAlt` days) and gained a "Just today"
+  one-time option, stored separately in `log.oneTimeExercises` so it never
+  recurs.
+- **Per-week day swap** — the existing day-swap mechanic in Settings
+  gained a week selector so it could target week 3+, not just A/B.
+- **Cross-week day swap** — generalized once more so the two sides of a
+  swap can belong to different weeks (e.g. "Monday of week 2 with
+  Wednesday of week 3"). The Settings card now has two independent
+  Week+Day pickers instead of one week selector driving both sides. No new
+  data model: each side reads/writes its own `dayMapForWeek(weekKey)` and
+  the two plan-slot values are exchanged between them.
