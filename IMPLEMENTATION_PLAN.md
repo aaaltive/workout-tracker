@@ -238,7 +238,32 @@ resurface if the count is increased again later.
 
 ---
 
-## 3. Cardio Upgrades
+## 3. Cardio Upgrades — ✅ Shipped
+
+> **Implemented status, see `TODO.md` for the full as-built checklist.**
+> Both open questions below were resolved with the user before building,
+> and the resolution changed scope significantly:
+> 1. **Swim is kept fully separate, not folded into `totalMiles`.** Rather
+>    than converting swim meters/yards into a mile-equivalent for the
+>    existing combined distance badges, the badge system was split into
+>    three independent per-activity tracks (Run/Bike in miles, Swim in
+>    km), replacing the old combined "X Mile Club" badges entirely.
+> 2. **Swim's field is "Best pace," not "Max speed."** Framed as a
+>    fastest-100m-split pace (two number inputs, min + sec) rather than a
+>    speed value, matching how swimmers actually think about effort.
+> 3. **New scope, not originally planned here:** per-activity cumulative
+>    distance badges (5/10/25/50/100 mi for Run and Bike, 5/10/25/50/100
+>    km for Swim) **and** a second badge tier for sustaining a weekly
+>    average at each of those same thresholds over the trailing 13 weeks
+>    (~3 months). Implemented as a rolling average (sum of the last 13
+>    calendar weeks ÷ 13, missing weeks count as 0) — this is one
+>    reasonable reading of "reached a weekly average and held it for 3
+>    months," not confirmed against a stricter alternative (every single
+>    week individually clearing the bar). Worth a quick look to confirm
+>    it matches intent.
+>
+> The rest of this section is kept as the original pre-build sketch, for
+> history.
 
 Current state: a cardio `PLAN` item (`type:"cardio"`) logs one entry per
 day to `log.cardio[id] = {type, distance, unit, duration}` (`unit`: `mi`

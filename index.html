@@ -290,16 +290,48 @@ const BADGES = [
   {id:"w50",        ic:"🏆", name:"50 Workouts",      desc:"Log 50 total workouts", check:(s)=>s.totalWorkouts>=50, prog:(s)=>[s.totalWorkouts,50]},
   {id:"w100",       ic:"👑", name:"100 Workouts",     desc:"Log 100 total workouts", check:(s)=>s.totalWorkouts>=100, prog:(s)=>[s.totalWorkouts,100]},
   {id:"perfectweek", ic:"⭐", name:"Perfect Week",    desc:"All 6 training days done in one calendar week", check:(s)=>s.perfectWeeks>=1},
-  {id:"dist5",      ic:"🏃", name:"5 Mile Club",      desc:"5 total cardio miles logged", check:(s)=>s.totalMiles>=5, prog:(s)=>[s.totalMiles.toFixed(1),5]},
-  {id:"dist10",     ic:"🚴", name:"10 Mile Club",     desc:"10 total cardio miles logged", check:(s)=>s.totalMiles>=10, prog:(s)=>[s.totalMiles.toFixed(1),10]},
-  {id:"dist26",     ic:"🎽", name:"Marathon Club",    desc:"26.2 total cardio miles logged", check:(s)=>s.totalMiles>=26.2, prog:(s)=>[s.totalMiles.toFixed(1),26.2]},
-  {id:"dist50",     ic:"🌊", name:"50 Mile Club",     desc:"50 total cardio miles logged", check:(s)=>s.totalMiles>=50, prog:(s)=>[s.totalMiles.toFixed(1),50]},
   {id:"triple",     ic:"🎯", name:"Triple Threat",    desc:"Log a run, a bike, and a swim", check:(s)=>s.cardioTypes.size>=3, prog:(s)=>[s.cardioTypes.size,3]},
   {id:"goalCreated", ic:"🎯", name:"Goal Setter",     desc:"Create a custom goal", check:(s)=>s.goalsCreated>=1},
   {id:"goalHalfway", ic:"📈", name:"Halfway There",   desc:"Reach 50% progress on a goal", check:(s)=>s.maxGoalProgress>=0.5},
   {id:"goalMet",     ic:"🥇", name:"Goal Crusher",    desc:"Fully complete a custom goal", check:(s)=>s.goalsCompleted>=1},
   {id:"goal3",       ic:"👑", name:"Goal Machine",    desc:"Complete 3 custom goals", check:(s)=>s.goalsCompleted>=3, prog:(s)=>[s.goalsCompleted,3]},
+  ...buildCardioBadges(),
 ];
+// Separate per-activity badge tracks (run/bike in miles, swim in km) instead
+// of one combined "cardio miles" pool - a cumulative-total tier per type,
+// plus a sustained-effort tier for holding a weekly average over the
+// trailing 13 weeks (~3 months). Generated rather than hand-written to
+// keep 30 near-identical entries consistent and typo-free.
+function buildCardioBadges(){
+  const tiers = [5,10,25,50,100];
+  const types = [
+    {type:"Run",  ic:"🏃", unit:"mi", unitWord:"miles"},
+    {type:"Bike", ic:"🚴", unit:"mi", unitWord:"miles"},
+    {type:"Swim", ic:"🏊", unit:"km", unitWord:"km"},
+  ];
+  const badges = [];
+  types.forEach(({type,ic,unit,unitWord})=>{
+    tiers.forEach(tier=>{
+      badges.push({
+        id:`${type.toLowerCase()}_total_${tier}`, ic,
+        name:`${tier} ${unit==="mi"?"Mile":"Kilometer"} ${type}`,
+        desc:`Log ${tier} total ${unitWord} of ${type.toLowerCase()}ing`,
+        check:(s)=>(s.cardioTotals[type]||0)>=tier,
+        prog:(s)=>[(s.cardioTotals[type]||0).toFixed(1), tier],
+      });
+    });
+    tiers.forEach(tier=>{
+      badges.push({
+        id:`${type.toLowerCase()}_avg13wk_${tier}`, ic:"📅",
+        name:`${tier} ${unit}/wk ${type} · 3mo`,
+        desc:`Average ${tier} ${unitWord}/week of ${type.toLowerCase()}ing over the last 13 weeks`,
+        check:(s)=>(s.cardioWeeklyAvg[type]||0)>=tier,
+        prog:(s)=>[(s.cardioWeeklyAvg[type]||0).toFixed(1), tier],
+      });
+    });
+  });
+  return badges;
+}
 
 /* ============================= GOAL TEMPLATES ============================= */
 const PLANCHE_GOAL_TEMPLATE = {
@@ -625,9 +657,9 @@ function estimateWorkoutSeconds(items, log){
   let total = 0;
   items.forEach(it=>{
     if(it.type==="cardio"){
-      const c = log && log.cardio && log.cardio[it.id];
-      if(c && c.duration){
-        total += (parseFloat(c.duration)||0) * 60;
+      const entries = log ? cardioEntriesFor(log, it.id) : [];
+      if(entries.length){
+        entries.forEach(c=>{ total += (parseFloat(c.duration)||0) * 60; });
       } else {
         const m = it.sr.match(/(\d+)(?:-(\d+))?\s*min/i);
         if(m){
@@ -654,11 +686,117 @@ function logFor(dateStr){
   if(!DATA.logs[dateStr].exerciseSnapshots) DATA.logs[dateStr].exerciseSnapshots = {};
   return DATA.logs[dateStr];
 }
-function milesFromEntry(c){
-  if(!c) return 0;
-  let d = parseFloat(c.distance)||0;
-  if(c.unit==="km") d = d*0.621371;
-  return d;
+// log.cardio[id] holds an array of logged entries (one per cardio session
+// logged that day, so e.g. a bike ride AND a swim can both be logged under
+// the same "run/bike/swim" slot). Older saves had a single flat object
+// instead of an array - this normalizes either shape to an array.
+function cardioEntriesFor(log, id){
+  const v = log && log.cardio && log.cardio[id];
+  if(!v) return [];
+  return Array.isArray(v) ? v : [v];
+}
+// Distance in a type-appropriate unit: miles for Run/Bike, kilometers for
+// Swim (independent unit systems, per design - see IMPLEMENTATION_PLAN.md).
+function cardioDistanceFor(entry){
+  if(!entry) return 0;
+  const d = parseFloat(entry.distance)||0;
+  if(entry.type==="Swim"){
+    const meters = entry.unit==="yd" ? d*0.9144 : d;
+    return meters/1000;
+  }
+  return entry.unit==="km" ? d*0.621371 : d;
+}
+function metersForSwim(entry){
+  const d = parseFloat(entry.distance)||0;
+  return entry.unit==="yd" ? d*0.9144 : d;
+}
+function formatPaceSeconds(totalSeconds, unitLabel){
+  if(!totalSeconds || !isFinite(totalSeconds) || totalSeconds<=0) return null;
+  const m = Math.floor(totalSeconds/60);
+  const s = Math.round(totalSeconds%60);
+  return `${m}:${s<10?"0":""}${s} /${unitLabel}`;
+}
+function formatAvgSpeed(distance, durationMin, unitLabel){
+  if(!durationMin || durationMin<=0 || !distance) return null;
+  return `${(distance/(durationMin/60)).toFixed(1)} ${unitLabel}`;
+}
+function formatAvgPace(distance, durationMin, unitLabel){
+  if(!distance || !durationMin || durationMin<=0) return null;
+  return formatPaceSeconds((durationMin*60)/distance, unitLabel);
+}
+function formatSwim100Pace(entry){
+  const meters = metersForSwim(entry);
+  const durationMin = parseFloat(entry.duration)||0;
+  if(!meters || !durationMin) return null;
+  return formatPaceSeconds(((durationMin*60)/meters)*100, "100m");
+}
+// Rolling average of the trailing 13 calendar weeks (~3 months), ending
+// with the current week. Weeks with no activity count as 0, so the
+// average reflects sustained effort, not a few good weeks - matches
+// "reached a weekly average and held it for 3 months."
+function trailing13WeekAverage(weekTotals){
+  let total = 0;
+  let d = todayDate();
+  for(let i=0;i<13;i++){
+    const wk = d.getFullYear()+"-"+getWeekNumber(d);
+    total += weekTotals[wk] || 0;
+    d = addDays(d, -7);
+  }
+  return total/13;
+}
+// One logged cardio entry's stats line: distance/time plus whatever
+// averages its type supports. Run/Bike show avg speed + avg pace plus the
+// user-entered max speed; Swim shows avg pace per 100m plus the
+// user-entered best 100m pace, normalizing yards to meters first.
+function cardioStatsLine(c){
+  const dist = `${c.distance} ${c.unit}`;
+  const dur = `${c.duration} min`;
+  let extra = "";
+  if(c.type==="Swim"){
+    const avgPace = formatSwim100Pace(c);
+    if(avgPace) extra += ` · Avg ${avgPace}`;
+    if(c.bestPace100Sec!=null) extra += ` · Best ${formatPaceSeconds(c.bestPace100Sec,"100m")}`;
+  } else {
+    const unitLabel = c.unit==="km" ? "km/h" : "mph";
+    const speed = formatAvgSpeed(parseFloat(c.distance)||0, parseFloat(c.duration)||0, unitLabel);
+    const pace = formatAvgPace(parseFloat(c.distance)||0, parseFloat(c.duration)||0, c.unit);
+    if(speed) extra += ` · Avg ${speed}`;
+    if(pace) extra += ` · ${pace}`;
+    if(c.maxSpeed!=null) extra += ` · Max ${c.maxSpeed} ${unitLabel}`;
+  }
+  return `${dist} · ${dur}${extra}`;
+}
+// `showCancel` renders a compact Save+Cancel row (used for "add another
+// entry", where there's something to cancel back to); without it, Save
+// renders as the original full-width block button (first/only entry).
+function cardioFormHtml(id, showCancel){
+  return `
+    <div class="seg" data-cardiotype="${id}">
+      <button data-val="Run">🏃 Run</button>
+      <button data-val="Bike">🚴 Bike</button>
+      <button data-val="Swim">🏊 Swim</button>
+    </div>
+    <div class="row2" style="margin-top:8px;">
+      <div class="field"><label>Distance</label><input type="number" inputmode="decimal" step="0.1" min="0" id="dist_${id}" placeholder="e.g. 2.5"></div>
+      <div class="field"><label>Unit</label>
+        <select id="unit_${id}"><option value="mi">mi</option><option value="km">km</option></select>
+      </div>
+    </div>
+    <div class="field" style="margin-top:8px;"><label>Time (minutes)</label><input type="number" inputmode="numeric" min="0" id="dur_${id}" placeholder="e.g. 25"></div>
+    <div class="field" style="margin-top:8px;" data-speedfield="${id}">
+      <label id="speedlabel_${id}">Max speed (mph)</label>
+      <input type="number" inputmode="decimal" step="0.1" min="0" id="maxspeed_${id}" placeholder="optional">
+    </div>
+    <div class="row2 hidden" style="margin-top:8px;" data-pacefield="${id}">
+      <div class="field"><label>Best 100m pace - min</label><input type="number" inputmode="numeric" min="0" id="pacemin_${id}" placeholder="optional"></div>
+      <div class="field"><label>sec</label><input type="number" inputmode="numeric" min="0" max="59" id="pacesec_${id}" placeholder="optional"></div>
+    </div>
+    ${showCancel ? `
+    <div style="display:flex;gap:8px;margin-top:8px;">
+      <button class="btn small" data-savecardio="${id}">Save cardio</button>
+      <button class="btn small ghost" data-cancelcardio="${id}">Cancel</button>
+    </div>` : `<button class="btn block" data-savecardio="${id}" style="margin-top:8px;">Save cardio</button>`}
+  `;
 }
 function uid(prefix){ return prefix+"_"+Date.now().toString(36)+"_"+Math.random().toString(36).slice(2,7); }
 function goalProgress(g){ return g.milestones.length ? g.milestones.filter(m=>m.done).length / g.milestones.length : 0; }
@@ -669,18 +807,40 @@ let activeTab = "today";
 let historyMonthOffset = 0; // 0 = current month
 let editingExId = null; // id of the exercise currently showing the sets/reps editor on Today
 let addingExercise = false; // whether the "add exercise" form is open on Today
+let addingCardioFor = null; // id of the cardio exercise currently showing the "add an entry" form
 
 /* ============================= STATS COMPUTATION ============================= */
 function computeStats(){
   const logs = DATA.logs;
-  let totalWorkouts=0, totalMiles=0;
+  let totalWorkouts=0;
   const cardioTypes = new Set();
+  const cardioTotals = {Run:0, Bike:0, Swim:0}; // miles for Run/Bike, km for Swim
+  const weeklyByType = {Run:{}, Bike:{}, Swim:{}}; // type -> "year-weekNum" -> distance that week
   const completedDates = [];
   for(const k in logs){
     const l = logs[k];
     if(l.fullyCompleted){ totalWorkouts++; completedDates.push(k); }
-    if(l.cardio){ totalMiles += milesFromEntry(l.cardio); if(l.cardio.type) cardioTypes.add(l.cardio.type); }
+    if(l.cardio){
+      for(const id in l.cardio){
+        cardioEntriesFor(l, id).forEach(entry=>{
+          if(!entry || !entry.type) return;
+          cardioTypes.add(entry.type);
+          const val = cardioDistanceFor(entry);
+          if(cardioTotals[entry.type]!=null) cardioTotals[entry.type] += val;
+          const d = new Date(k+"T00:00:00");
+          const wk = d.getFullYear()+"-"+getWeekNumber(d);
+          if(!weeklyByType[entry.type]) weeklyByType[entry.type] = {};
+          weeklyByType[entry.type][wk] = (weeklyByType[entry.type][wk]||0) + val;
+        });
+      }
+    }
   }
+  const totalMiles = cardioTotals.Run + cardioTotals.Bike;
+  const cardioWeeklyAvg = {
+    Run: trailing13WeekAverage(weeklyByType.Run),
+    Bike: trailing13WeekAverage(weeklyByType.Bike),
+    Swim: trailing13WeekAverage(weeklyByType.Swim),
+  };
   completedDates.sort();
 
   // streaks over scheduled days (Mon-Sat), Sunday never breaks streak
@@ -736,7 +896,7 @@ function computeStats(){
   const goalsCompleted = DATA.goals.filter(isGoalComplete).length;
   const maxGoalProgress = DATA.goals.reduce((mx,g)=>Math.max(mx, goalProgress(g)), 0);
 
-  return {totalWorkouts, totalMiles, cardioTypes, longestStreak:longest, currentStreak:cur, perfectWeeks,
+  return {totalWorkouts, totalMiles, cardioTypes, cardioTotals, cardioWeeklyAvg, longestStreak:longest, currentStreak:cur, perfectWeeks,
     goalsCreated, goalsCompleted, maxGoalProgress};
 }
 
@@ -828,8 +988,6 @@ function renderToday(){
 
   const items = itemsFor(plan, weekLabel, planSlot);
   const doneCount = items.filter(it => log.done[it.id]).length;
-  const cardioItems = items.filter(it=>it.type==="cardio");
-  const allCardioLogged = cardioItems.every(it => log.cardio && log.cardio[it.id]);
   const pct = items.length ? Math.round((doneCount/items.length)*100) : 0;
   const canFinish = items.length>0 && doneCount===items.length;
   const estMin = fmtDurationMin(estimateWorkoutSeconds(items, log));
@@ -849,7 +1007,8 @@ function renderToday(){
   items.forEach(it=>{
     const isDone = !!log.done[it.id];
     if(it.type==="cardio"){
-      const c = (log.cardio && log.cardio[it.id]) ? log.cardio[it.id] : null;
+      const entries = cardioEntriesFor(log, it.id);
+      const isAddingThis = addingCardioFor === it.id;
       html += `
         <div class="exercise">
           <div class="checkbox ${isDone?'checked':''}"></div>
@@ -861,25 +1020,14 @@ function renderToday(){
             </div>
             <div class="ex-sr">${it.sr}</div>
             <div class="ex-notes">${it.notes}</div>
-            <div class="cardio-card ${c?'logged':''}" data-cardio="${it.id}">
-              ${c ? `
-                <div class="cardio-summary">✅ <b>${c.type}</b> · ${c.distance} ${c.unit} · ${c.duration} min</div>
-                <button class="btn small ghost" data-editcardio="${it.id}" style="margin-top:8px;">Edit</button>
-              ` : `
-                <div class="seg" data-cardiotype="${it.id}">
-                  <button data-val="Run">🏃 Run</button>
-                  <button data-val="Bike">🚴 Bike</button>
-                  <button data-val="Swim">🏊 Swim</button>
-                </div>
-                <div class="row2">
-                  <div class="field"><label>Distance</label><input type="number" inputmode="decimal" step="0.1" min="0" id="dist_${it.id}" placeholder="e.g. 2.5"></div>
-                  <div class="field"><label>Unit</label>
-                    <select id="unit_${it.id}"><option value="mi">mi</option><option value="km">km</option></select>
-                  </div>
-                </div>
-                <div class="field" style="margin-top:8px;"><label>Time (minutes)</label><input type="number" inputmode="numeric" min="0" id="dur_${it.id}" placeholder="e.g. 25"></div>
-                <button class="btn block" data-savecardio="${it.id}">Save cardio</button>
-              `}
+            <div class="cardio-card ${entries.length?'logged':''}" data-cardio="${it.id}">
+              ${entries.map((c,idx)=>`
+                <div class="cardio-summary">
+                  ✅ <b>${c.type}</b> · ${cardioStatsLine(c)}
+                  <div style="margin-top:4px;"><button class="btn small ghost" data-removecardio="${it.id}|${idx}">Remove</button></div>
+                </div>`).join("")}
+              ${(isAddingThis || !entries.length) ? cardioFormHtml(it.id, entries.length>0)
+                : `<button class="btn small ghost block" data-addcardio="${it.id}" style="margin-top:8px;">+ Add another cardio entry</button>`}
             </div>
           </div>
         </div>`;
@@ -1063,7 +1211,13 @@ function renderToday(){
       renderToday();
     };
   }
-  // cardio seg buttons
+  // cardio seg buttons - switching type also swaps the distance unit
+  // (mi/km for Run/Bike, m/yd for Swim) and the max-speed vs. best-pace field
+  function updateCardioSpeedLabel(id){
+    const unitSel = document.getElementById("unit_"+id);
+    const lbl = document.getElementById("speedlabel_"+id);
+    if(unitSel && lbl) lbl.textContent = `Max speed (${unitSel.value==="km"?"km/h":"mph"})`;
+  }
   view.querySelectorAll("[data-cardiotype]").forEach(seg=>{
     const id = seg.getAttribute("data-cardiotype");
     seg.querySelectorAll("button").forEach(b=>{
@@ -1071,8 +1225,22 @@ function renderToday(){
         seg.querySelectorAll("button").forEach(x=>x.classList.remove("active"));
         b.classList.add("active");
         seg.dataset.selected = b.dataset.val;
+        const isSwim = b.dataset.val==="Swim";
+        const unitSel = document.getElementById("unit_"+id);
+        if(unitSel){
+          unitSel.innerHTML = isSwim
+            ? `<option value="m">m</option><option value="yd">yd</option>`
+            : `<option value="mi">mi</option><option value="km">km</option>`;
+        }
+        const speedField = view.querySelector(`[data-speedfield="${id}"]`);
+        const paceField = view.querySelector(`[data-pacefield="${id}"]`);
+        if(speedField) speedField.classList.toggle("hidden", isSwim);
+        if(paceField) paceField.classList.toggle("hidden", !isSwim);
+        updateCardioSpeedLabel(id);
       };
     });
+    const unitSel = document.getElementById("unit_"+id);
+    if(unitSel) unitSel.onchange = ()=> updateCardioSpeedLabel(id);
   });
   view.querySelectorAll("[data-savecardio]").forEach(btn=>{
     btn.onclick = ()=>{
@@ -1084,18 +1252,40 @@ function renderToday(){
       const dur = document.getElementById("dur_"+id).value;
       if(!type){ alert("Pick run, bike, or swim first."); return; }
       if(!dist || !dur){ alert("Add distance and time."); return; }
+      const entry = {type, distance:dist, unit, duration:dur};
+      if(type==="Swim"){
+        const min = parseInt(document.getElementById("pacemin_"+id).value, 10);
+        const sec = parseInt(document.getElementById("pacesec_"+id).value, 10);
+        if(!isNaN(min) || !isNaN(sec)) entry.bestPace100Sec = (isNaN(min)?0:min)*60 + (isNaN(sec)?0:sec);
+      } else {
+        const ms = parseFloat(document.getElementById("maxspeed_"+id).value);
+        if(!isNaN(ms) && ms>0) entry.maxSpeed = ms;
+      }
       if(!log.cardio) log.cardio = {};
-      log.cardio[id] = {type, distance:dist, unit, duration:dur};
+      log.cardio[id] = cardioEntriesFor(log, id);
+      log.cardio[id].push(entry);
       log.done[id] = true;
+      addingCardioFor = null;
       saveData();
       renderToday();
     };
   });
-  view.querySelectorAll("[data-editcardio]").forEach(btn=>{
+  view.querySelectorAll("[data-addcardio]").forEach(btn=>{
     btn.onclick = ()=>{
-      const id = btn.getAttribute("data-editcardio");
-      delete log.cardio[id];
-      log.done[id] = false;
+      addingCardioFor = btn.getAttribute("data-addcardio");
+      renderToday();
+    };
+  });
+  view.querySelectorAll("[data-cancelcardio]").forEach(btn=>{
+    btn.onclick = ()=>{ addingCardioFor = null; renderToday(); };
+  });
+  view.querySelectorAll("[data-removecardio]").forEach(btn=>{
+    btn.onclick = ()=>{
+      const [id, idxStr] = btn.getAttribute("data-removecardio").split("|");
+      const entries = cardioEntriesFor(log, id);
+      entries.splice(parseInt(idxStr,10), 1);
+      log.cardio[id] = entries;
+      log.done[id] = entries.length>0;
       saveData();
       renderToday();
     };
@@ -1277,9 +1467,9 @@ function showDayModal(key){
         const snap = log.exerciseSnapshots && log.exerciseSnapshots[it.id];
         const displayName = (done && snap) ? snap.name : it.name;
         let extra = "";
-        if(it.type==="cardio" && log.cardio && log.cardio[it.id]){
-          const c = log.cardio[it.id];
-          extra = ` — ${c.type}, ${c.distance}${c.unit}, ${c.duration}min`;
+        if(it.type==="cardio"){
+          const entries = cardioEntriesFor(log, it.id);
+          if(entries.length) extra = ` — ` + entries.map(c=>`${c.type}, ${c.distance}${c.unit}, ${c.duration}min`).join("; ");
         } else if(done && snap && snap.sr){
           extra = ` — ${snap.sr}`;
         }
@@ -1837,7 +2027,7 @@ function renderSettings(){
 /* ============================= TAB SWITCHING ============================= */
 function renderTab(tab){
   activeTab = tab;
-  if(tab!=="today"){ editingExId = null; addingExercise = false; }
+  if(tab!=="today"){ editingExId = null; addingExercise = false; addingCardioFor = null; }
   document.querySelectorAll("nav.tabbar button").forEach(b=>{
     b.classList.toggle("active", b.getAttribute("data-tab")===tab);
   });

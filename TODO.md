@@ -11,10 +11,13 @@ same as prior work. Check items off as they land.
       **Resolved:** user asked instead for new weeks to be seeded as a
       full copy of an earlier week (see section 2 below) rather than
       starting sparse — implemented that way.
-- [ ] Confirm whether swim distance should count toward the existing
-      mile-based badges (`5 Mile Club`, etc.).
-- [ ] Confirm "max speed" wording/units for swim (mph-style vs. a pace
-      framing).
+- [x] Confirm whether swim distance should count toward the existing
+      mile-based badges (`5 Mile Club`, etc.). **Resolved:** no — split
+      into fully separate per-activity badge tracks instead (Run/Bike in
+      miles, Swim in km), see section 3 below.
+- [x] Confirm "max speed" wording/units for swim (mph-style vs. a pace
+      framing). **Resolved:** pace framing — "Best 100m pace" (min+sec),
+      see section 3 below.
 
 ## 1. Special Training Days
 
@@ -139,45 +142,81 @@ renaming "A" → "Alpha" and confirming A's stock exercises still matched.
 - [x] Regression: all tabs render with no errors, both mocked and
       real-clock dates
 
-## 3. Cardio Upgrades
+## 3. Cardio Upgrades — ✅ Shipped (`claude/cardio-upgrades` branch, merged here)
+
+Scope grew substantially from the original sketch — see the
+implementation note at the top of section 3 in `IMPLEMENTATION_PLAN.md`
+for the two decisions (swim kept separate from miles; "Best pace" not
+"Max speed") and the new badge-system work that wasn't originally planned
+(per-activity cumulative + sustained-weekly-average badges, 45 badges
+total up from the original 18).
 
 **Fix while here**
-- [ ] `computeStats()` cardio aggregation bug: reads `l.cardio.type`/
+- [x] `computeStats()` cardio aggregation bug: reads `l.cardio.type`/
       `milesFromEntry(l.cardio)` as if `log.cardio` were a flat entry
-      instead of a dict keyed by exercise id — fix as part of the
+      instead of a dict keyed by exercise id — fixed as part of the
       array-ification below
 
 **Data model**
-- [ ] `log.cardio[id]` becomes an array of entries (was a single object)
-- [ ] `cardioEntriesFor(log, id)` read-helper that normalizes old
-      single-object entries to a 1-element array
+- [x] `log.cardio[id]` becomes an array of entries (was a single object)
+- [x] `cardioEntriesFor(log, id)` read-helper that normalizes old
+      single-object entries to a 1-element array (also used by
+      `estimateWorkoutSeconds` and `showDayModal`, which had the same
+      flat-entry assumption)
 
 **Per-type UI/fields**
-- [ ] Run/Bike: add Max speed input (unit matches mi/km selection)
-- [ ] Run/Bike: compute + display avg speed and avg pace (`M:SS /mi` or
-      `/km`)
-- [ ] Swim: change unit `<select>` from mi/km to m/yd
-- [ ] Swim: add Max speed input
-- [ ] Swim: compute + display avg pace per 100 m (`M:SS /100m`),
-      normalizing yards → meters first
+- [x] Run/Bike: Max speed input (unit label follows the mi/km selection
+      live)
+- [x] Run/Bike: avg speed + avg pace (`M:SS /mi` or `/km`) in the summary
+- [x] Swim: unit `<select>` changed from mi/km to m/yd
+- [x] Swim: **Best 100m pace** input (min + sec, not "Max speed" — see
+      decision above)
+- [x] Swim: avg pace per 100 m (`M:SS /100m`) in the summary, normalizing
+      yards → meters first (verified: 1000 yd / 17 min → 1:52 /100m)
 
 **Helpers**
-- [ ] `formatPace(totalSeconds, unitLabel)`
-- [ ] `formatSpeed(distance, durationHours)`
-- [ ] Unit-aware mile-equivalent conversion (mi/km/m/yd) for
-      `totalMiles`/badge aggregation
+- [x] `formatPaceSeconds(totalSeconds, unitLabel)`
+- [x] `formatAvgSpeed(distance, durationMin, unitLabel)` /
+      `formatAvgPace(distance, durationMin, unitLabel)`
+- [x] `cardioDistanceFor(entry)` — unit-aware conversion to miles
+      (Run/Bike) or km (Swim) for `cardioTotals`/badge aggregation
+- [x] `trailing13WeekAverage(weekTotals)` for the sustained-average
+      badges
+
+**Badges (new scope)**
+- [x] Replaced the 4 combined "X Mile Club" badges + kept "Triple
+      Threat" as-is
+- [x] `buildCardioBadges()` generates 30 badges: 5/10/25/50/100
+      cumulative-total tier × {Run mi, Bike mi, Swim km}, plus the same 5
+      tiers × 13-week rolling average × the same 3 activities
+- [x] `computeStats()` returns `cardioTotals` and `cardioWeeklyAvg` per
+      activity type
 
 **Multiple entries per day**
-- [ ] Render a stacked list of summary cards per cardio item (one per
-      logged entry), each with Edit/Remove
-- [ ] "+ Add another" button (hidden while a new entry form is open)
+- [x] Stacked list of summary cards per cardio item (one per logged
+      entry), each with its own Remove button
+- [x] "+ Add another cardio entry" button; hidden while that item's form
+      is open, with a Cancel button to back out without saving
 
-**Testing**
-- [ ] jsdom pass: log a run with max speed, verify avg speed + pace
-      display and math
-- [ ] Log a swim in yards, verify meters-normalized `/100m` pace
-- [ ] Log two entries (e.g. bike + swim) under the same cardio slot same
-      day, verify both persist and `log.done[id]` stays true
-- [ ] Verify `computeStats()` totals/badges after the aggregation fix
-- [ ] Regression: all tabs render, existing single-entry logs from before
-      this change still display correctly
+**Testing (jsdom)**
+- [x] Log a run with max speed, verify avg speed (10.0 mph) + avg pace
+      (6:00 /mi) + max speed all display correctly
+- [x] Log a swim in meters and in yards, verify both produce correct
+      meters-normalized `/100m` pace
+- [x] Log two entries (Run + Swim, then Run + Bike) under the same cardio
+      slot same day, verify both persist independently
+- [x] Remove entries down to zero, verify `log.done[id]` resets to false
+      and the form reappears
+- [x] `computeStats()` per-activity totals verified (Run totals correct,
+      Bike stays 0, `totalMiles` = Run+Bike only)
+- [x] Badge generation verified (45 total, old combined badges gone, new
+      ids present, a tier badge actually earns when its threshold is met)
+- [x] 13-week rolling average verified against a hand-computed expected
+      value (3 weeks of 10mi runs ÷ 13 ≈ 2.31 mi/wk)
+- [x] Migration: an old pre-upgrade single-object `log.cardio[id]` entry
+      still renders and counts toward the duration estimate
+- [x] Cancel button on the "add another" form
+- [x] Duration estimate sums multiple entries' durations correctly
+- [x] History (`showDayModal`) shows all entries for a day, not just one
+- [x] Regression: all tabs render with no errors, both mocked and
+      real-clock dates
