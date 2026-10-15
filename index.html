@@ -913,7 +913,9 @@ let editingExId = null; // id of the exercise currently showing the sets/reps ed
 let addingExercise = false; // whether the "add exercise" form is open on Today
 let addingCardioFor = null; // id of the cardio exercise currently showing the "add an entry" form
 let specialDraft = null; // {notes, activities:[{id,title,description}]} while editing a special day on Today
-let swapWeekSelected = null; // which week's day-swap the Settings "Swap workout days" card is viewing/editing
+let swapWeekSelected = null; // which week's current day order the "Swap workout days" card is viewing/resetting
+let swapSideAWeek = null; // week picked for side A of the swap (may differ from side B - cross-week swap)
+let swapSideBWeek = null; // week picked for side B of the swap
 
 /* ============================= STATS COMPUTATION ============================= */
 function computeStats(){
@@ -2123,6 +2125,8 @@ function renderSettings(){
   const wc = weekCycle();
   if(!swapWeekSelected || !wc.keys.includes(swapWeekSelected)) swapWeekSelected = wc.keys[0];
   const swapWeekKey = swapWeekSelected;
+  if(!swapSideAWeek || !wc.keys.includes(swapSideAWeek)) swapSideAWeek = wc.keys[0];
+  if(!swapSideBWeek || !wc.keys.includes(swapSideBWeek)) swapSideBWeek = wc.keys[0];
   const stats = computeStats();
   const lastBackupAt = DATA.settings.lastBackupAt || null;
   const daysSinceBackup = lastBackupAt ? Math.floor((Date.now()-lastBackupAt)/86400000) : null;
@@ -2173,28 +2177,43 @@ function renderSettings(){
       <div class="settings-row">
         <div>
           <div class="lbl">Swap workout days</div>
-          <div class="desc">Permanently swap which day two workouts fall on, for one week in your rotation. Applies to that week only, every time it comes around.</div>
+          <div class="desc">Permanently swap which day two workouts fall on - within one week, or between two different weeks.</div>
         </div>
       </div>
-      <div class="field" style="margin-top:8px;">
-        <label>Week</label>
-        <select id="swapWeekSelect">
-          ${wc.keys.map(k=>`<option value="${k}" ${k===swapWeekKey?"selected":""}>${weekName(k)}</option>`).join("")}
-        </select>
-      </div>
-      <div class="row2" style="margin-top:8px;align-items:flex-end;">
+      <div class="lbl" style="font-size:12px;margin-top:10px;">Day A</div>
+      <div class="row2" style="margin-top:4px;align-items:flex-end;">
         <div class="field">
-          <label>Day A</label>
-          <select id="swapDayA">${swappableDayOptions(swapWeekKey)}</select>
+          <label>Week</label>
+          <select id="swapWeekA">${wc.keys.map(k=>`<option value="${k}" ${k===swapSideAWeek?"selected":""}>${weekName(k)}</option>`).join("")}</select>
         </div>
         <div class="field">
-          <label>Day B</label>
-          <select id="swapDayB">${swappableDayOptions(swapWeekKey)}</select>
+          <label>Day</label>
+          <select id="swapDayA">${swappableDayOptions(swapSideAWeek)}</select>
         </div>
       </div>
-      <button class="btn block" id="swapDaysBtn">⇄ Swap these days</button>
-      <div style="font-size:11.5px;color:var(--muted);margin-top:10px;line-height:1.7;">${dayOrderSummary(swapWeekKey)}</div>
-      ${isDayMapDefaultForWeek(swapWeekKey) ? "" : `<button class="btn small ghost" id="resetDaysBtn" style="margin-top:8px;">Restore original day order for ${weekName(swapWeekKey)}</button>`}
+      <div class="lbl" style="font-size:12px;margin-top:10px;">Day B</div>
+      <div class="row2" style="margin-top:4px;align-items:flex-end;">
+        <div class="field">
+          <label>Week</label>
+          <select id="swapWeekB">${wc.keys.map(k=>`<option value="${k}" ${k===swapSideBWeek?"selected":""}>${weekName(k)}</option>`).join("")}</select>
+        </div>
+        <div class="field">
+          <label>Day</label>
+          <select id="swapDayB">${swappableDayOptions(swapSideBWeek)}</select>
+        </div>
+      </div>
+      <button class="btn block" id="swapDaysBtn" style="margin-top:10px;">⇄ Swap these days</button>
+
+      <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line);">
+        <div class="field">
+          <label>Current order for</label>
+          <select id="swapWeekSelect">
+            ${wc.keys.map(k=>`<option value="${k}" ${k===swapWeekKey?"selected":""}>${weekName(k)}</option>`).join("")}
+          </select>
+        </div>
+        <div style="font-size:11.5px;color:var(--muted);margin-top:10px;line-height:1.7;">${dayOrderSummary(swapWeekKey)}</div>
+        ${isDayMapDefaultForWeek(swapWeekKey) ? "" : `<button class="btn small ghost" id="resetDaysBtn" style="margin-top:8px;">Restore original day order for ${weekName(swapWeekKey)}</button>`}
+      </div>
     </div>
 
     <div class="card">
@@ -2294,22 +2313,38 @@ function renderSettings(){
       renderSettings();
     };
   }
+  document.getElementById("swapWeekA").onchange = (e)=>{
+    swapSideAWeek = e.target.value;
+    renderSettings();
+  };
+  document.getElementById("swapWeekB").onchange = (e)=>{
+    swapSideBWeek = e.target.value;
+    renderSettings();
+  };
   document.getElementById("swapWeekSelect").onchange = (e)=>{
     swapWeekSelected = e.target.value;
     renderSettings();
   };
   document.getElementById("swapDaysBtn").onclick = ()=>{
-    const a = parseInt(document.getElementById("swapDayA").value, 10);
-    const b = parseInt(document.getElementById("swapDayB").value, 10);
-    if(a===b) return;
-    const map = {...dayMapForWeek(swapWeekKey)};
-    const tmp = map[a] || a;
-    map[a] = map[b] || b;
-    map[b] = tmp;
-    setDayMapForWeek(swapWeekKey, map);
+    const weekA = document.getElementById("swapWeekA").value;
+    const dowA = parseInt(document.getElementById("swapDayA").value, 10);
+    const weekB = document.getElementById("swapWeekB").value;
+    const dowB = parseInt(document.getElementById("swapDayB").value, 10);
+    if(weekA===weekB && dowA===dowB) return;
+    const mapA = {...dayMapForWeek(weekA)};
+    const mapB = weekA===weekB ? mapA : {...dayMapForWeek(weekB)};
+    const pA = mapA[dowA] || dowA;
+    const pB = mapB[dowB] || dowB;
+    mapA[dowA] = pB;
+    mapB[dowB] = pA;
+    setDayMapForWeek(weekA, mapA);
+    setDayMapForWeek(weekB, mapB);
     saveData();
     renderSettings();
-    showSimpleToast("Days swapped", `${DOW_NAMES[a]} and ${DOW_NAMES[b]} will now swap workouts in ${weekName(swapWeekKey)}, starting the next time that week comes around.`);
+    const msg = weekA===weekB
+      ? `${DOW_NAMES[dowA]} and ${DOW_NAMES[dowB]} will now swap workouts in ${weekName(weekA)}, starting the next time that week comes around.`
+      : `${DOW_NAMES[dowA]} (${weekName(weekA)}) and ${DOW_NAMES[dowB]} (${weekName(weekB)}) will now swap workouts, starting the next time each week comes around.`;
+    showSimpleToast("Days swapped", msg);
   };
   const resetDaysBtn = document.getElementById("resetDaysBtn");
   if(resetDaysBtn){
