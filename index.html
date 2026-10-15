@@ -564,18 +564,28 @@ function effectiveWeight(it){
 function nameWithWeight(name, weight){
   return name.replace(/(\d+(?:\.\d+)?)(\s*lb\b)/i, (m, num, rest) => weight + rest);
 }
+function decorateItem(it){
+  const eff = effectiveSR(it);
+  const effW = effectiveWeight(it);
+  const name = effW.weight!=null ? nameWithWeight(it.name, effW.weight) : it.name;
+  const merged = {...it, name, sr:eff.sr, _sets:eff.sets, _reps:eff.reps, _isTime:eff.isTime,
+    _editable:eff.editable, _customized:eff.customized || effW.customized, _custom:!!it.custom,
+    _weight:effW.weight, _weightEditable:effW.editable, _weightCustomized:effW.customized};
+  merged._progressionDue = progressionReminderDue(merged);
+  return merged;
+}
 function itemsFor(plan, weekKey, planSlot){
   const stock = plan.items.filter(it => it.week==="both" || it.week===weekKey);
   const custom = planSlot!=null ? customExercisesFor(planSlot).filter(it => it.week==="both" || it.week===weekKey) : [];
-  return [...stock, ...custom].filter(it => !isRemoved(it.id)).map(it=>{
-    const eff = effectiveSR(it);
-    const effW = effectiveWeight(it);
-    const name = effW.weight!=null ? nameWithWeight(it.name, effW.weight) : it.name;
-    const merged = {...it, name, sr:eff.sr, _sets:eff.sets, _reps:eff.reps, _isTime:eff.isTime,
-      _editable:eff.editable, _customized:eff.customized || effW.customized, _custom:!!it.custom,
-      _weight:effW.weight, _weightEditable:effW.editable, _weightCustomized:effW.customized};
-    merged._progressionDue = progressionReminderDue(merged);
-    return merged;
+  return [...stock, ...custom].filter(it => !isRemoved(it.id)).map(decorateItem);
+}
+// One-time exercises (added "just today") aren't tied to a weekday/week template at
+// all, so they bypass itemsFor entirely - merged in by the caller for one specific date.
+function oneTimeItemsFor(log){
+  return oneTimeExercisesFor(log).map(it=>{
+    const decorated = decorateItem(it);
+    decorated._oneTime = true;
+    return decorated;
   });
 }
 /* ============================= WEIGHT PROGRESSION TRACKING ============================= */
@@ -615,6 +625,19 @@ function addCustomExercise(planSlot, ex){
 function removeCustomExercise(planSlot, id){
   const list = DATA.settings.customExercises && DATA.settings.customExercises[planSlot];
   if(list) DATA.settings.customExercises[planSlot] = list.filter(e=>e.id!==id);
+}
+// One-time exercises live on the day's own log entry (not settings.customExercises,
+// which is keyed by weekday/week and recurs forever) - a single-occurrence addition
+// that never shows up again on a future visit to this weekday.
+function oneTimeExercisesFor(log){
+  return (log && log.oneTimeExercises) || [];
+}
+function addOneTimeExercise(log, ex){
+  if(!log.oneTimeExercises) log.oneTimeExercises = [];
+  log.oneTimeExercises.push(ex);
+}
+function removeOneTimeExercise(log, id){
+  if(log.oneTimeExercises) log.oneTimeExercises = log.oneTimeExercises.filter(e=>e.id!==id);
 }
 function isRemoved(id){
   return !!(DATA.settings.removedExerciseIds && DATA.settings.removedExerciseIds[id]);
@@ -1054,7 +1077,7 @@ function renderToday(){
     return;
   }
 
-  const items = itemsFor(plan, weekLabel, planSlot);
+  const items = [...itemsFor(plan, weekLabel, planSlot), ...oneTimeItemsFor(log)];
   const doneCount = items.filter(it => log.done[it.id]).length;
   const pct = items.length ? Math.round((doneCount/items.length)*100) : 0;
   const canFinish = items.length>0 && doneCount===items.length;
@@ -1083,7 +1106,7 @@ function renderToday(){
           <div class="ex-body">
             <div class="ex-title-row">
               <span class="ex-name ${isDone?'done':''}">${it.name}</span>
-              ${it._custom ? `<span class="badge-week" style="background:var(--gold);">ADDED</span>` : ""}
+              ${it._oneTime ? `<span class="badge-week" style="background:var(--gold);">ONE-TIME</span>` : (it._custom ? `<span class="badge-week" style="background:var(--gold);">ADDED</span>` : "")}
               <button class="btn small ghost" data-removeex="${it.id}" style="margin-left:auto;padding:2px 9px;font-size:11px;">✕ Remove</button>
             </div>
             <div class="ex-sr">${it.sr}</div>
@@ -1129,7 +1152,7 @@ function renderToday(){
               <span class="ex-name ${isDone?'done':''}">${it.name}</span>
               ${it.week!=="both" ? `<span class="badge-week" style="background:${weekColor(it.week)};">${weekName(it.week)}</span>` : ""}
               ${it._customized ? `<span class="badge-week" style="background:var(--gold);">CUSTOM</span>` : ""}
-              ${it._custom ? `<span class="badge-week" style="background:var(--gold);">ADDED</span>` : ""}
+              ${it._oneTime ? `<span class="badge-week" style="background:var(--gold);">ONE-TIME</span>` : (it._custom ? `<span class="badge-week" style="background:var(--gold);">ADDED</span>` : "")}
               <button class="btn small ghost" data-removeex="${it.id}" style="margin-left:auto;padding:2px 9px;font-size:11px;">✕ Remove</button>
             </div>
             ${srBlock}
@@ -1146,14 +1169,14 @@ function renderToday(){
         <div class="lbl" style="font-weight:700;font-size:13.5px;margin-bottom:6px;">Add an exercise</div>
         <div class="field"><label>Name</label><input type="text" id="newExName" placeholder="e.g. Face pulls"></div>
         <div class="field" style="margin-top:8px;"><label>Sets x reps (optional)</label><input type="text" id="newExSr" placeholder="e.g. 3 x 12"></div>
-        ${plan.hasAlt ? `
         <div style="margin-top:8px;">
           <label style="font-size:11px;color:var(--muted);font-weight:600;display:block;margin-bottom:3px;">Applies to</label>
           <div class="seg" id="newExWeekSeg" style="flex-wrap:wrap;">
             <button data-val="both" class="active">Every week</button>
-            ${weekCycle().keys.map(k=>`<button data-val="${k}">${weekName(k)} only</button>`).join("")}
+            ${weekCycle().count>1 ? weekCycle().keys.map(k=>`<button data-val="${k}">${weekName(k)} only</button>`).join("") : ""}
+            <button data-val="once">Just today</button>
           </div>
-        </div>` : ""}
+        </div>
         <div style="display:flex;gap:8px;margin-top:10px;">
           <button class="btn small" id="saveNewExBtn">Add</button>
           <button class="btn small ghost" id="cancelNewExBtn">Cancel</button>
@@ -1235,11 +1258,12 @@ function renderToday(){
       const id = btn.getAttribute("data-removeex");
       const it = items.find(x=>x.id===id);
       if(!it) return;
-      const msg = it._custom
+      const msg = (it._custom || it._oneTime)
         ? `Remove "${it.name}" from this workout?`
         : `Remove "${it.name}" from this workout? You can restore it later from Settings.`;
       if(!confirm(msg)) return;
-      if(it._custom) removeCustomExercise(planSlot, id);
+      if(it._oneTime) removeOneTimeExercise(log, id);
+      else if(it._custom) removeCustomExercise(planSlot, id);
       else setRemoved(id, true);
       if(editingExId===id) editingExId = null;
       saveData();
@@ -1273,7 +1297,11 @@ function renderToday(){
       const sr = document.getElementById("newExSr").value.trim();
       if(!name){ alert("Enter an exercise name."); return; }
       const week = newExWeekSeg ? (newExWeekSeg.dataset.selected || "both") : "both";
-      addCustomExercise(planSlot, {id:uid("custom"), name, sr, notes:"", url:"", week, custom:true});
+      if(week==="once"){
+        addOneTimeExercise(log, {id:uid("once"), name, sr, notes:"", url:"", week:"both"});
+      } else {
+        addCustomExercise(planSlot, {id:uid("custom"), name, sr, notes:"", url:"", week, custom:true});
+      }
       addingExercise = false;
       saveData();
       renderToday();
@@ -1692,7 +1720,7 @@ function showDayModal(key){
     }
   } else if(plan){
     const weekLabel = (log && log.week) || weekLabelFor(d);
-    const items = itemsFor(plan, weekLabel, planSlot);
+    const items = [...itemsFor(plan, weekLabel, planSlot), ...(log ? oneTimeItemsFor(log) : [])];
     if(plan.hasAlt) weekBadge = `<span class="badge-week" style="margin-left:8px;background:${weekColor(weekLabel)};">WEEK ${weekName(weekLabel)}</span>`;
 
     if(log){
