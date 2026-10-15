@@ -151,7 +151,26 @@ modal (Title input, Description textarea, Save) — same modal pattern as
 
 ---
 
-## 2. Custom Week Periodicity (beyond Week A/B)
+## 2. Custom Week Periodicity (beyond Week A/B) — ✅ Shipped
+
+> **Implemented status, see `TODO.md` for the full as-built checklist.**
+> Two decisions were made/changed during implementation, both confirmed
+> with the user first:
+> 1. **Stable key vs. display name, split apart.** The `labels[]` array
+>    sketched below would have let renaming a week (e.g. "A" → "Alpha")
+>    silently break its match against the stock `PLAN` data's hardcoded
+>    `week:"A"` tags. Shipped instead as `weekCycle.keys` (stable,
+>    generated once) + `weekCycle.names` (freely renameable display text
+>    per key). All rendering goes through a `weekName(key)` helper.
+> 2. **New weeks are seeded as a full copy, not left sparse.** The user
+>    asked for a new week to clone the week two slots back (`count-2`;
+>    e.g. a 3rd week copies week 1, a 4th copies week 2) using each
+>    exercise's current effective sets/reps/weight, rather than starting
+>    with only "every week" exercises as originally sketched below. New
+>    weeks default to a numbered display name ("Week 3", "Week 4", ...).
+>
+> The rest of this section is kept as the original pre-build sketch, for
+> history.
 
 Today, `weekLetterFor(d)` returns `"A"` or `"B"` from ISO-week-number
 parity (or a manual `DATA.settings.weekOverride` of `"auto"/"A"/"B"`).

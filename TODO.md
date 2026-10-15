@@ -5,9 +5,12 @@ same as prior work. Check items off as they land.
 
 ## Before starting
 
-- [ ] Confirm the "no auto-generated content" caveat for custom week
+- [x] Confirm the "no auto-generated content" caveat for custom week
       counts (section 2 of the plan) — increasing week count only affects
       every-week + user-added exercises, not the stock A/B plan content.
+      **Resolved:** user asked instead for new weeks to be seeded as a
+      full copy of an earlier week (see section 2 below) rather than
+      starting sparse — implemented that way.
 - [ ] Confirm whether swim distance should count toward the existing
       mile-based badges (`5 Mile Club`, etc.).
 - [ ] Confirm "max speed" wording/units for swim (mph-style vs. a pace
@@ -70,44 +73,71 @@ same as prior work. Check items off as they land.
 - [ ] Regression: all tabs still render; normal (non-special) days
       unaffected
 
-## 2. Custom Week Periodicity
+## 2. Custom Week Periodicity — ✅ Shipped (`claude/custom-week-cycles` branch, cherry-picked here)
+
+Implemented with one deliberate deviation from the original sketch below:
+each week has a **stable internal key** (used for all `week:` tag
+matching, generated once, never changes) separate from a **free-form
+display name** (`weekCycle.names[key]`), instead of a flat `labels[]`
+array doubling as both. This was necessary because renaming a week
+(including the original "A"/"B") would otherwise silently break its link
+to the stock `PLAN` data's hardcoded `week:"A"/"B"` tags. Verified by
+renaming "A" → "Alpha" and confirming A's stock exercises still matched.
 
 **Data model**
-- [ ] `DATA.settings.weekCycle = {count:2, labels:["A","B"], override:"auto"}`
-      default, migration guard
-- [ ] Decide storage for item week-tags beyond `"both"`/current
-      labels (no change needed if just adding more labels to pick from)
+- [x] `DATA.settings.weekCycle = {count, keys, names, override}` default
+      (`{count:2, keys:["A","B"], names:{A:"A",B:"B"}, override:"auto"}`),
+      migration guard in `loadData()`
+- [x] Item `week:` tags continue to store the stable key (unchanged
+      mechanism — `"both"`, `"A"`, `"B"`, or a generated key like `wk_...`
+      for weeks 3+)
 
 **Core logic**
-- [ ] `weekLabelFor(d)` replacing `weekLetterFor` (mod-`count` rotation +
-      override)
-- [ ] Update every call site of `weekLetterFor` (`renderToday`,
-      `showDayModal`, anywhere else `grep`-confirmed at build time)
-- [ ] Update `itemsFor` filter to use the new label
+- [x] `weekLabelFor(d)` replacing `weekLetterFor` (mod-`count` rotation +
+      override, override validated against current `keys`)
+- [x] `weekName(key)` / `weekColor(key)` helpers — all user-facing text
+      goes through `weekName()`, never the raw key (keys for weeks 3+ are
+      opaque uids)
+- [x] Updated every call site (`renderToday`, `showDayModal`, the
+      `#hdrWeekPill`/badge rendering, the Today "+ Add exercise" selector)
+- [x] `itemsFor` filter needed no change — already generic string
+      comparison against whatever key is passed in
 
 **Settings UI**
-- [ ] "Training week cycle" card: count input, per-label text fields
-- [ ] Dynamically generate the week-override segmented control from
-      `weekCycle.labels` (replacing the hardcoded Auto/A/B buttons)
+- [x] "Training week cycle" card: dynamic `Auto / Force <week>` segmented
+      control, per-week renameable text inputs, **"+ Add a week"** /
+      **"− Remove last week"** buttons, **"Restore 2-week A/B cycle"**
+      reset (shown only when non-default)
+- [x] **Seeding on add:** a new week clones every exercise specific to the
+      week two slots back (`count-2`; falls back to the most recent week
+      if there's no "two back" week yet) — stock + already-added custom
+      exercises, using each one's *current effective* sets/reps/weight
+      baked in as an independent snapshot. New week's default display
+      name is numbered ("Week 3", "Week 4", ...), per the user's answer.
+- [x] Removing a week doesn't delete its exercises, only hides them
+      (consistent with exercise-removal elsewhere); resets `override` to
+      `"auto"` if it pointed at the removed week
 
 **Today tab**
-- [ ] Dynamically generate the "+ Add exercise" week-applies selector
-      from `weekCycle.labels`
+- [x] "+ Add exercise" week-applies selector now generates one button per
+      current week (via `weekName()`) instead of the hardcoded 3-button
+      Every week/A/B set
 
 **Edge cases**
-- [ ] Shrinking `count` doesn't delete out-of-range-tagged exercises
-      (they just stop showing)
-- [ ] `isDayMapDefault`-style helper if needed for a "reset week cycle to
-      default" action in Settings
+- [x] Shrinking the cycle doesn't delete out-of-range-tagged exercises
+- [x] `isWeekCycleDefault()` / `resetWeekCycle()` for the reset action
 
-**Testing**
-- [ ] jsdom pass: default 2-week behavior unchanged byte-for-byte after
-      the refactor (regression-critical)
-- [ ] 4-week cycle: verify rotation, override, and that `"both"`-tagged
-      items still show every week
-- [ ] Add a custom exercise tagged to week 3/4, verify it only shows on
-      that week
-- [ ] Regression: all tabs render, History previews unaffected
+**Testing (jsdom)**
+- [x] Default 2-week A/B behavior matches the original ISO-week-parity
+      logic exactly, for two known dates (regression-critical)
+- [x] Force override round-trip; add-a-week seeding (verified the exact 7
+      cloned Monday exercises); rename-in-isolation preserves stock A/B
+      matching + updates display everywhere; force the new week and see
+      the clones; remove-last-week resets a stale override; reset to
+      default; "+ Add exercise" selector renders N dynamic buttons and
+      tags with the stable key, not display text
+- [x] Regression: all tabs render with no errors, both mocked and
+      real-clock dates
 
 ## 3. Cardio Upgrades
 
