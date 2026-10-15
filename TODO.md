@@ -19,62 +19,102 @@ same as prior work. Check items off as they land.
       framing). **Resolved:** pace framing — "Best 100m pace" (min+sec),
       see section 3 below.
 
-## 1. Special Training Days
+## 1. Special Training Days — ✅ Shipped (`claude/special-training-days` branch, merged here)
+
+All three "Decisions carried over from the plan" questions were resolved
+per their recommended defaults — see the implementation note at the top
+of section 1 in `IMPLEMENTATION_PLAN.md`, including the one addition
+beyond the original sketch (`log.specialDescription` also frozen, not
+just `specialTitle`).
 
 **Data model**
-- [ ] `DATA.specialDays = []` (templates: `{id, title, description, createdAt}`)
-- [ ] `DATA.settings.scheduledSpecialDays = {}` (`dateStr -> specialDayId`)
-- [ ] `log.specialDayId` / `log.specialTitle` / `log.specialNotes` /
-      `log.specialActivities` fields, written at completion time
-- [ ] Migration guards in `loadData()` + wherever logs are read, matching
-      the existing pattern for `exerciseOverrides`/`customExercises`
+- [x] `DATA.specialDays = []` (templates: `{id, title, description, createdAt}`)
+- [x] `DATA.settings.scheduledSpecialDays = {}` (`dateStr -> specialDayId`)
+- [x] `log.specialDayId` / `log.specialTitle` / `log.specialDescription` /
+      `log.specialNotes` / `log.specialActivities` fields, written at
+      completion time
+- [x] Migration guards in `loadData()`, matching the existing pattern for
+      `exerciseOverrides`/`customExercises`; also added `specialDays`/
+      `scheduledSpecialDays` to the "Reset all data" fresh-state object
+      (it was already missing several other fields for older features -
+      not fixed here, out of scope, but didn't make it worse)
 
 **Helpers**
-- [ ] `specialDayFor(dateStr)`
-- [ ] `scheduleSpecialDay(dateStr, id)` / `unscheduleSpecialDay(dateStr)`
-- [ ] `addSpecialDayTemplate(...)` / `deleteSpecialDayTemplate(id)`
+- [x] `specialDayFor(dateStr)` — single source of truth: returns frozen
+      log fields once completed (`frozen:true`), else the live template
+      if one's scheduled, else `null`
+- [x] `scheduleSpecialDay(dateStr, id)` / `unscheduleSpecialDay(dateStr)`
+- [x] `addSpecialDayTemplate(title, description)` /
+      `deleteSpecialDayTemplate(id)` — deleting also clears any
+      not-yet-completed scheduled dates pointing at it, so `specialDayFor`
+      never has to handle a dangling reference
 
 **Today tab**
-- [ ] New render branch in `renderToday()` for `specialDayFor(key)`
-- [ ] Title + description display
-- [ ] Notes `<textarea>`
-- [ ] Activities list builder (title + description per row, "+ Add
-      activity" to append)
-- [ ] "Complete Special Training Day" button → freezes notes/activities,
-      sets `fullyCompleted`
-- [ ] Edit flow for a completed special day (re-open frozen notes/
+- [x] New render branch in `renderToday()` for `specialDayFor(key)`
+      (`renderSpecialToday`), short-circuiting before the normal
+      plan/rest-day logic
+- [x] Title + description display
+- [x] Notes `<textarea>`
+- [x] Activities list builder (title + description per row, "+ Add
+      activity" to append, "✕ Remove" per row) — backed by an in-memory
+      `specialDraft` state var (mirrors `editingExId`/`addingExercise`),
+      read from the live DOM before every re-render so typed-but-unsaved
+      text in existing rows survives adding/removing a row
+- [x] "Complete Special Training Day" button → freezes notes/activities,
+      sets `fullyCompleted`, runs `checkNewBadges()`
+- [x] Edit flow for a completed special day (re-open frozen notes/
       activities, not the live template)
-- [ ] "⚡ Special day" button next to `#hdrWeekPill` → picker modal →
+- [x] "⚡ Special day" button next to `#hdrWeekPill` (styled as a
+      `.weekpill` for contrast on the dark header, shown regardless of
+      whether today has a week pill or is a rest day) → picker modal →
       `scheduleSpecialDay`
-- [ ] "↩ Back to normal workout" to unschedule (only before completion)
+- [x] "↩ Back to normal workout" to unschedule (only shown before
+      completion)
 
 **Calendar / History**
-- [ ] Scheduling entry point inside `showDayModal` for other dates
-- [ ] `showDayModal` renders the special-day template/log instead of the
+- [x] Scheduling entry point inside `showDayModal` for other dates
+      (`⚡ Use a special training day` / `⚡ Change special training day`)
+- [x] `showDayModal` renders the special-day template/log instead of the
       normal exercise list when one is scheduled/logged for that date
-- [ ] Month calendar grid (`renderHistory` / `.cal-cell`): show a small ⚡
-      marker on any day with `log.specialDayId` set, so special training
-      days are visible at a glance when scanning past months
-- [ ] Decide + implement whether scheduled-but-not-yet-completed future
-      special days also get a (dimmer) bolt in the month view
+- [x] Month calendar grid (`renderHistory` / `.cal-cell`): a small ⚡
+      marker (`.special-mark`) on any day with a completed special day
+- [x] Scheduled-but-not-yet-completed days also get the marker, at 45%
+      opacity (`.special-mark.dim`) to distinguish from completed
+- [x] A completed special day on a Sunday now shows "done" (green) in the
+      calendar instead of "rest" (grey) — a normal rested-but-unmarked
+      Sunday is unaffected
 
 **Settings / management**
-- [ ] New "Special Training Days" card: list + "+ New special training
+- [x] New "Special Training Days" card: list + "+ New special training
       day" modal (Title, Description, Save)
-- [ ] Delete template (with confirm)
+- [x] Delete template (with confirm)
 
-**Decisions carried over from the plan**
-- [ ] Sunday scheduling + streak counting (`scheduledDow()` in
-      `computeStats()`)
-- [ ] Confirm special-day completion counts toward `totalWorkouts`/badges
-      (should be free, just verify)
+**Decisions carried over from the plan** (all resolved, see implementation
+note in `IMPLEMENTATION_PLAN.md`)
+- [x] Sunday scheduling + streak counting — `scheduledDow(dow, key)` now
+      checks the specific date's `specialDayId`, not just day-of-week
+- [x] Special-day completion counts toward `totalWorkouts`/badges —
+      confirmed free, verified in testing
 
-**Testing**
-- [ ] jsdom pass: create template, schedule on Today, complete with notes
-      + 2+ activities, verify frozen in log, verify History shows frozen
-      data after editing/deleting the template
-- [ ] Regression: all tabs still render; normal (non-special) days
-      unaffected
+**Testing (jsdom)**
+- [x] Create template, schedule on Today via the header button, fill
+      notes + 2 activities (verified surviving a mid-entry re-render),
+      complete, verify all fields frozen correctly in the log
+- [x] Calendar shows a full-opacity bolt + "done" styling for the
+      completed day; a separately-scheduled future day shows a dim bolt
+- [x] History modal shows frozen title/description/notes/activities, no
+      reschedule button once completed
+- [x] Deleting the template afterward leaves the completed day's History
+      and Today display completely unaffected (frozen fields win)
+- [x] Scheduling a future date via History, reopening the picker, "Change"
+      flow
+- [x] "Back to normal workout" correctly reverts Today to the normal
+      Monday workout view, with the header button reappearing
+- [x] Streak math: a completed special Sunday extends a streak (Sat+Sun+Mon
+      = 3); a plain completed-but-not-special Sunday does not (stays 1)
+- [x] Regression: all tabs render with no errors, both mocked and
+      real-clock dates; re-ran the week-cycle and cardio test suites
+      against this same branch with no regressions
 
 ## 2. Custom Week Periodicity — ✅ Shipped (`claude/custom-week-cycles` branch, cherry-picked here)
 

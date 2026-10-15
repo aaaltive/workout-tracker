@@ -13,7 +13,33 @@ new render branches, wired up the same way `exerciseOverrides`,
 
 ---
 
-## 1. Special Training Days
+## 1. Special Training Days — ✅ Shipped
+
+> **Implemented status, see `TODO.md` for the full as-built checklist.**
+> All three open questions below were resolved per their "recommend yes"
+> defaults and implemented as described:
+> 1. **Sunday scheduling counts toward streaks** — but only for the
+>    specific Sunday that was completed as a special day, not Sundays in
+>    general. `scheduledDow(dow, key)` now takes the date key too, so a
+>    plain "mark today as rested" Sunday still never breaks/extends a
+>    streak (unchanged from before), while a Sunday with
+>    `log.specialDayId` set does.
+> 2. **Editing after completion is allowed** — an "Edit" button re-opens
+>    the notes/activities form pre-filled from the frozen log fields (not
+>    the live template), saving back over the same frozen fields.
+> 3. **Badges/`totalWorkouts` count automatically** — confirmed, no code
+>    needed beyond setting `log.fullyCompleted` the same way a normal
+>    workout does.
+>
+> One addition beyond the original sketch: `log.specialDescription` is
+> also frozen at completion (the sketch below only froze `specialTitle`).
+> Without it, deleting a template after completing a day with it would
+> have kept the title but silently lost the description — freezing both
+> keeps the "deleting a template never rewrites history" guarantee
+> complete.
+>
+> The rest of this section is kept as the original pre-build sketch, for
+> history.
 
 A special training day **replaces** a specific calendar date's normal
 workout with a free-form activity: a title, optional description, and (on

@@ -114,6 +114,8 @@
   .cal-cell.missed{background:#FBE7E6;color:var(--red);}
   .cal-cell.today{box-shadow:0 0 0 2px var(--navy) inset;}
   .cal-cell.future{background:#F4F7FA;color:#C3CBD3;}
+  .special-mark{position:absolute;top:1px;right:2px;font-size:9px;line-height:1;}
+  .special-mark.dim{opacity:.45;}
   .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:11px;color:var(--muted);margin-top:10px;}
   .legend span{display:inline-flex;align-items:center;gap:4px;}
   .dot{width:9px;height:9px;border-radius:3px;display:inline-block;}
@@ -357,7 +359,7 @@ function loadData(){
     const raw = localStorage.getItem(STORE_KEY);
     if(raw) return JSON.parse(raw);
   }catch(e){}
-  return {logs:{}, settings:{dayMap:{...DEFAULT_DAY_MAP}, exerciseOverrides:{}, customExercises:{}, removedExerciseIds:{}, weightTracking:{}, weekCycle:{count:2, keys:["A","B"], names:{A:"A",B:"B"}, override:"auto"}}, earnedBadges:{}, goals:[]};
+  return {logs:{}, settings:{dayMap:{...DEFAULT_DAY_MAP}, exerciseOverrides:{}, customExercises:{}, removedExerciseIds:{}, weightTracking:{}, weekCycle:{count:2, keys:["A","B"], names:{A:"A",B:"B"}, override:"auto"}, scheduledSpecialDays:{}}, earnedBadges:{}, goals:[], specialDays:[]};
 }
 function saveData(){ localStorage.setItem(STORE_KEY, JSON.stringify(DATA)); }
 let DATA = loadData();
@@ -371,6 +373,8 @@ if(!DATA.settings.weekCycle || !Array.isArray(DATA.settings.weekCycle.keys) || D
 }
 if(!DATA.settings.weekCycle.names) DATA.settings.weekCycle.names = {};
 if(DATA.settings.weekCycle.count !== DATA.settings.weekCycle.keys.length) DATA.settings.weekCycle.count = DATA.settings.weekCycle.keys.length;
+if(!DATA.settings.scheduledSpecialDays) DATA.settings.scheduledSpecialDays = {};
+if(!DATA.specialDays) DATA.specialDays = [];
 if(!DATA.goals) DATA.goals = [];
 
 /* ============================= HELPERS ============================= */
@@ -802,12 +806,61 @@ function uid(prefix){ return prefix+"_"+Date.now().toString(36)+"_"+Math.random(
 function goalProgress(g){ return g.milestones.length ? g.milestones.filter(m=>m.done).length / g.milestones.length : 0; }
 function isGoalComplete(g){ return g.milestones.length>0 && g.milestones.every(m=>m.done); }
 
+/* ============================= SPECIAL TRAINING DAYS ============================= */
+// DATA.specialDays holds reusable templates (title + optional description).
+// DATA.settings.scheduledSpecialDays maps a specific calendar date to a
+// template id - a one-time replacement of that date's normal plan, unlike
+// exerciseOverrides/customExercises which apply to a recurring weekday.
+// specialDayFor() is the single source of truth for "is this date special,
+// and what should it show": once a day is completed, it returns the frozen
+// log fields (title/description copied at completion time) rather than the
+// live template, so editing or deleting a template later never rewrites
+// history - same principle as exercise snapshots.
+function specialDayFor(key){
+  const log = DATA.logs[key];
+  if(log && log.specialDayId){
+    return {id:log.specialDayId, title:log.specialTitle||"Special Training Day", description:log.specialDescription||"", frozen:true};
+  }
+  const schedId = DATA.settings.scheduledSpecialDays && DATA.settings.scheduledSpecialDays[key];
+  if(!schedId) return null;
+  const tmpl = DATA.specialDays.find(s=>s.id===schedId);
+  if(!tmpl) return null;
+  return {id:tmpl.id, title:tmpl.title, description:tmpl.description||"", frozen:false};
+}
+function scheduleSpecialDay(dateStr, specialDayId){
+  if(!DATA.settings.scheduledSpecialDays) DATA.settings.scheduledSpecialDays = {};
+  DATA.settings.scheduledSpecialDays[dateStr] = specialDayId;
+}
+function unscheduleSpecialDay(dateStr){
+  if(DATA.settings.scheduledSpecialDays) delete DATA.settings.scheduledSpecialDays[dateStr];
+}
+function addSpecialDayTemplate(title, description){
+  const tmpl = {id:uid("special"), title, description, createdAt:Date.now()};
+  DATA.specialDays.push(tmpl);
+  return tmpl;
+}
+// Deleting a template also clears any not-yet-completed scheduled dates
+// pointing at it, so specialDayFor() never has to fall back to a dangling
+// reference. Completed (frozen) days are untouched - they don't depend on
+// the template existing anymore.
+function deleteSpecialDayTemplate(id){
+  DATA.specialDays = DATA.specialDays.filter(s=>s.id!==id);
+  const sched = DATA.settings.scheduledSpecialDays || {};
+  Object.keys(sched).forEach(dateStr=>{
+    if(sched[dateStr]===id){
+      const log = DATA.logs[dateStr];
+      if(!log || !log.fullyCompleted) delete sched[dateStr];
+    }
+  });
+}
+
 /* ============================= STATE ============================= */
 let activeTab = "today";
 let historyMonthOffset = 0; // 0 = current month
 let editingExId = null; // id of the exercise currently showing the sets/reps editor on Today
 let addingExercise = false; // whether the "add exercise" form is open on Today
 let addingCardioFor = null; // id of the cardio exercise currently showing the "add an entry" form
+let specialDraft = null; // {notes, activities:[{id,title,description}]} while editing a special day on Today
 
 /* ============================= STATS COMPUTATION ============================= */
 function computeStats(){
@@ -843,9 +896,11 @@ function computeStats(){
   };
   completedDates.sort();
 
-  // streaks over scheduled days (Mon-Sat), Sunday never breaks streak
+  // streaks over scheduled days (Mon-Sat), Sunday never breaks streak -
+  // unless that specific Sunday was completed as a special training day,
+  // in which case it counts like any other scheduled day.
   function isCompleted(dateStr){ return logs[dateStr] && logs[dateStr].fullyCompleted; }
-  function scheduledDow(dow){ return dow !== 0; }
+  function scheduledDow(dow, key){ return dow !== 0 || !!(logs[key] && logs[key].specialDayId); }
 
   // current streak: walk backward from today
   let cur = 0;
@@ -854,8 +909,8 @@ function computeStats(){
   if(!isCompleted(dateKey(cursor))) cursor = addDays(cursor,-1);
   while(true){
     const dow = cursor.getDay();
-    if(!scheduledDow(dow)){ cursor = addDays(cursor,-1); continue; }
     const key = dateKey(cursor);
+    if(!scheduledDow(dow, key)){ cursor = addDays(cursor,-1); continue; }
     if(isCompleted(key)){ cur++; cursor = addDays(cursor,-1); }
     else break;
     if(cur>3650) break;
@@ -870,8 +925,9 @@ function computeStats(){
     let d = new Date(first);
     while(d<=last){
       const dow = d.getDay();
-      if(scheduledDow(dow)){
-        if(isCompleted(dateKey(d))) { run++; longest=Math.max(longest,run); }
+      const key = dateKey(d);
+      if(scheduledDow(dow, key)){
+        if(isCompleted(key)) { run++; longest=Math.max(longest,run); }
         else run = 0;
       }
       d = addDays(d,1);
@@ -963,8 +1019,20 @@ function renderToday(){
 
   document.getElementById("hdrTitle").innerHTML = `<h1>${DOW_NAMES[dow]}</h1>`;
   const dstr = `${MONTH_NAMES[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
+
+  const special = specialDayFor(key);
+  if(special){
+    document.getElementById("hdrSub").textContent = `⚡ ${special.title} · ${dstr}`;
+    document.getElementById("hdrWeekPill").innerHTML = "";
+    renderSpecialToday(special, key, log);
+    showInstallTipIfNeeded();
+    return;
+  }
+
   document.getElementById("hdrSub").textContent = plan ? (plan.title + (plan.subtitle? " · "+plan.subtitle : "")) + " · " + dstr : "Rest Day · " + dstr;
-  document.getElementById("hdrWeekPill").innerHTML = (plan && plan.hasAlt) ? `<span class="weekpill">WEEK ${weekName(weekLabel)}</span>` : "";
+  document.getElementById("hdrWeekPill").innerHTML = ((plan && plan.hasAlt) ? `<span class="weekpill">WEEK ${weekName(weekLabel)}</span> ` : "")
+    + `<button class="weekpill" id="specialDayBtn" style="border:none;cursor:pointer;">⚡ Special day</button>`;
+  document.getElementById("specialDayBtn").onclick = ()=> showSpecialDayPicker(key);
 
   const view = document.getElementById("view");
 
@@ -1309,6 +1377,157 @@ function renderToday(){
   showInstallTipIfNeeded();
 }
 
+/* ============================= RENDER: SPECIAL TRAINING DAY (TODAY) ============================= */
+function renderSpecialToday(special, key, log){
+  const view = document.getElementById("view");
+  const completed = !!log.fullyCompleted;
+
+  let html = `
+    <div class="card">
+      <div class="ex-title-row">
+        <span class="ex-name" style="font-size:17px;">⚡ ${special.title}</span>
+      </div>
+      ${special.description ? `<div class="ex-notes" style="margin-top:4px;">${special.description}</div>` : ""}`;
+
+  if(completed){
+    html += `
+      <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line);">
+        <div style="font-size:13px;font-weight:700;color:var(--green);">✅ Completed</div>
+        ${log.specialNotes ? `<div class="ex-notes" style="margin-top:8px;white-space:pre-wrap;">${log.specialNotes}</div>` : ""}
+        ${(log.specialActivities||[]).map(a=>`
+          <div class="exercise">
+            <div class="checkbox checked"></div>
+            <div class="ex-body">
+              <div class="ex-name">${a.title}</div>
+              ${a.description ? `<div class="ex-notes" style="margin-top:2px;">${a.description}</div>` : ""}
+            </div>
+          </div>`).join("")}
+        <button class="btn small ghost" id="editSpecialBtn" style="margin-top:10px;">Edit</button>
+      </div>`;
+  } else {
+    if(!specialDraft) specialDraft = {notes:"", activities:[]};
+    html += `
+      <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line);">
+        <div class="field"><label>Notes</label><textarea id="specialNotesInput" rows="3" placeholder="How did it go?">${specialDraft.notes}</textarea></div>
+        <div class="lbl" style="font-weight:700;font-size:13.5px;margin-top:14px;">Activities</div>
+        ${specialDraft.activities.map((a,idx)=>`
+          <div class="row2" style="margin-top:8px;align-items:flex-end;">
+            <div class="field"><label>Title</label><input type="text" id="specialActTitle_${idx}" value="${a.title}" placeholder="e.g. Trail hike"></div>
+            <div class="field"><label>Description</label><input type="text" id="specialActDesc_${idx}" value="${a.description}" placeholder="optional"></div>
+          </div>
+          <button class="btn small ghost" data-removeact="${idx}" style="margin-top:4px;padding:3px 9px;font-size:11px;">✕ Remove</button>`).join("")}
+        <button class="btn small ghost block" id="addActivityBtn" style="margin-top:10px;">+ Add activity</button>
+        <button class="btn finish-btn" id="completeSpecialBtn" style="margin-top:14px;">Complete Special Training Day</button>
+        <button class="btn small ghost" id="unscheduleSpecialBtn" style="margin-top:10px;">↩ Back to normal workout</button>
+      </div>`;
+  }
+  html += `</div>` + goalExercisesCardHtml(key);
+  view.innerHTML = html;
+  wireGoalExerciseCheckboxes(key, view);
+
+  const editBtn = document.getElementById("editSpecialBtn");
+  if(editBtn){
+    editBtn.onclick = ()=>{
+      specialDraft = {notes: log.specialNotes||"", activities: (log.specialActivities||[]).map(a=>({...a}))};
+      renderToday();
+    };
+  }
+  const addActBtn = document.getElementById("addActivityBtn");
+  if(addActBtn){
+    addActBtn.onclick = ()=>{
+      readSpecialDraftFromView(view);
+      specialDraft.activities.push({id:uid("act"), title:"", description:""});
+      renderToday();
+    };
+  }
+  view.querySelectorAll("[data-removeact]").forEach(btn=>{
+    btn.onclick = ()=>{
+      readSpecialDraftFromView(view);
+      specialDraft.activities.splice(parseInt(btn.getAttribute("data-removeact"),10), 1);
+      renderToday();
+    };
+  });
+  const completeBtn = document.getElementById("completeSpecialBtn");
+  if(completeBtn){
+    completeBtn.onclick = ()=>{
+      readSpecialDraftFromView(view);
+      const cleanActivities = specialDraft.activities
+        .map(a=>({id:a.id, title:(a.title||"").trim(), description:(a.description||"").trim()}))
+        .filter(a=>a.title || a.description);
+      log.specialDayId = special.id;
+      log.specialTitle = special.title;
+      log.specialDescription = special.description || "";
+      log.specialNotes = (specialDraft.notes||"").trim();
+      log.specialActivities = cleanActivities;
+      log.fullyCompleted = true;
+      log.completedAt = Date.now();
+      specialDraft = null;
+      saveData();
+      const newBadges = checkNewBadges();
+      renderToday();
+      if(newBadges.length){ showBadgeToast(newBadges); }
+      else { showSimpleToast("Nice work! 🎉", `Logged "${special.title}" for ${DOW_NAMES[new Date(key+"T00:00:00").getDay()]}.`); }
+    };
+  }
+  const unschedBtn = document.getElementById("unscheduleSpecialBtn");
+  if(unschedBtn){
+    unschedBtn.onclick = ()=>{
+      unscheduleSpecialDay(key);
+      specialDraft = null;
+      saveData();
+      renderToday();
+    };
+  }
+}
+function readSpecialDraftFromView(view){
+  if(!specialDraft) return;
+  const notesEl = view.querySelector("#specialNotesInput");
+  if(notesEl) specialDraft.notes = notesEl.value;
+  specialDraft.activities.forEach((a,idx)=>{
+    const t = view.querySelector(`#specialActTitle_${idx}`);
+    const de = view.querySelector(`#specialActDesc_${idx}`);
+    if(t) a.title = t.value;
+    if(de) a.description = de.value;
+  });
+}
+// Picker modal for assigning a special-day template to `dateStr`. `afterPick`
+// (defaults to re-rendering Today) lets callers from other contexts - like
+// the History day modal - control what refreshes after scheduling.
+function showSpecialDayPicker(dateStr, afterPick){
+  afterPick = afterPick || renderToday;
+  const root = document.getElementById("modalRoot");
+  const hasTemplates = DATA.specialDays.length>0;
+  root.innerHTML = `
+    <div class="toast-overlay" id="specialPickOverlay">
+      <div class="modal-day" style="position:relative;max-height:78vh;overflow-y:auto;text-align:left;">
+        <button class="close-x" id="specialPickClose">×</button>
+        <h3>Use a special training day</h3>
+        ${hasTemplates ? DATA.specialDays.map(s=>`
+          <button class="btn block ghost" data-pickspecial="${s.id}" style="margin-top:8px;text-align:left;">
+            <b>${s.title}</b>${s.description ? `<div style="font-size:12px;font-weight:400;color:var(--muted);margin-top:2px;">${s.description}</div>` : ""}
+          </button>`).join("") : `
+          <p style="color:var(--muted);font-size:13.5px;">You haven't created any special training days yet.</p>
+          <button class="btn block" id="goCreateSpecialBtn">Create one in Settings</button>
+        `}
+      </div>
+    </div>`;
+  document.getElementById("specialPickClose").onclick = ()=>{ root.innerHTML=""; };
+  document.getElementById("specialPickOverlay").onclick = (e)=>{ if(e.target.id==="specialPickOverlay") root.innerHTML=""; };
+  root.querySelectorAll("[data-pickspecial]").forEach(btn=>{
+    btn.onclick = ()=>{
+      scheduleSpecialDay(dateStr, btn.getAttribute("data-pickspecial"));
+      saveData();
+      root.innerHTML = "";
+      specialDraft = null;
+      afterPick();
+    };
+  });
+  const goBtn = document.getElementById("goCreateSpecialBtn");
+  if(goBtn){
+    goBtn.onclick = ()=>{ root.innerHTML=""; renderTab("settings"); };
+  }
+}
+
 function showInstallTipIfNeeded(){
   const isStandalone = window.navigator.standalone === true ||
     (typeof window.matchMedia === "function" && window.matchMedia("(display-mode: standalone)").matches);
@@ -1392,8 +1611,14 @@ function renderHistory(){
     else if(dow===0) cls = "rest";
     else if(log && log.fullyCompleted) cls = "done";
     else if(d < today) cls = "missed";
+    // a completed special training day always reads as done, even on an
+    // otherwise-always-rest Sunday
+    if(log && log.specialDayId && log.fullyCompleted) cls = "done";
     if(dateKey(d)===dateKey(today)) cls += " today";
-    cells += `<div class="cal-cell ${cls}" data-date="${key}">${day}</div>`;
+    const completedSpecial = log && log.specialDayId;
+    const scheduledSpecial = !completedSpecial && DATA.settings.scheduledSpecialDays && DATA.settings.scheduledSpecialDays[key];
+    const mark = completedSpecial ? `<span class="special-mark">⚡</span>` : (scheduledSpecial ? `<span class="special-mark dim">⚡</span>` : "");
+    cells += `<div class="cal-cell ${cls}" data-date="${key}">${day}${mark}</div>`;
   }
 
   const view = document.getElementById("view");
@@ -1447,7 +1672,18 @@ function showDayModal(key){
   let body = "";
   let weekBadge = "";
 
-  if(dow===0){
+  const special = specialDayFor(key);
+  if(special){
+    body = special.description ? `<p style="color:var(--muted);font-size:13px;margin:-4px 0 8px;">${special.description}</p>` : "";
+    if(special.frozen){
+      body += `<div class="item"><b>Status</b><b>Completed ✅</b></div>`;
+      if(log.specialNotes) body += `<div style="font-size:13.5px;margin-top:8px;"><b>Notes:</b> ${log.specialNotes}</div>`;
+      body += (log.specialActivities||[]).map(a=>
+        `<div class="item"><span>${a.title}${a.description?` — ${a.description}`:""}</span><span>✅</span></div>`).join("");
+    } else {
+      body += `<p style="color:var(--muted);font-size:13.5px;">${isFuture ? "Scheduled - nothing logged yet." : "Scheduled - open the Today tab to log it."}</p>`;
+    }
+  } else if(dow===0){
     // Sunday / rest day
     if(log){
       body = `<p style="color:var(--muted);font-size:13.5px;">${log.fullyCompleted? "Marked as rested ✅" : "Not logged"}</p>`;
@@ -1488,16 +1724,26 @@ function showDayModal(key){
     }
   }
 
+  if(!special || !special.frozen){
+    body += `<button class="btn small ghost block" id="scheduleSpecialBtn" style="margin-top:12px;">⚡ ${special ? "Change special training day" : "Use a special training day"}</button>`;
+  }
+
   root.innerHTML = `
     <div class="toast-overlay" id="dayOverlay">
       <div class="modal-day" style="position:relative;max-height:78vh;overflow-y:auto;">
         <button class="close-x" id="dayClose">×</button>
-        <h3>${DOW_NAMES[dow]} · ${MONTH_NAMES[d.getMonth()]} ${d.getDate()}${weekBadge}</h3>
+        <h3>${special ? "⚡ "+special.title : DOW_NAMES[dow]} · ${MONTH_NAMES[d.getMonth()]} ${d.getDate()}${weekBadge}</h3>
         ${body}
       </div>
     </div>`;
   document.getElementById("dayClose").onclick = ()=>{ root.innerHTML=""; };
   document.getElementById("dayOverlay").onclick = (e)=>{ if(e.target.id==="dayOverlay") root.innerHTML=""; };
+  const schedBtn = document.getElementById("scheduleSpecialBtn");
+  if(schedBtn){
+    schedBtn.onclick = ()=>{
+      showSpecialDayPicker(key, ()=>{ renderHistory(); showDayModal(key); });
+    };
+  }
 }
 
 /* ============================= RENDER: AWARDS ============================= */
@@ -1732,6 +1978,37 @@ function showNewGoalModal(){
   };
 }
 
+function showNewSpecialModal(){
+  const root = document.getElementById("modalRoot");
+  root.innerHTML = `
+    <div class="toast-overlay" id="specialModalOverlay">
+      <div class="modal-day" style="position:relative;max-height:82vh;overflow-y:auto;text-align:left;">
+        <button class="close-x" id="specialModalClose">×</button>
+        <h3>New Special Training Day</h3>
+        <div class="field" style="margin-bottom:10px;">
+          <label>Title</label>
+          <input type="text" id="newSpecialTitle" placeholder="e.g. Trail Hike Day">
+        </div>
+        <div class="field">
+          <label>Description (optional)</label>
+          <textarea id="newSpecialDesc" rows="4" placeholder="What this day is about"></textarea>
+        </div>
+        <button class="btn block" id="createSpecialBtn" style="margin-top:12px;">Create</button>
+      </div>
+    </div>`;
+  document.getElementById("specialModalClose").onclick = ()=>{ root.innerHTML=""; };
+  document.getElementById("specialModalOverlay").onclick = (e)=>{ if(e.target.id==="specialModalOverlay") root.innerHTML=""; };
+  document.getElementById("createSpecialBtn").onclick = ()=>{
+    const title = document.getElementById("newSpecialTitle").value.trim();
+    if(!title){ alert("Give it a title first."); return; }
+    const description = document.getElementById("newSpecialDesc").value.trim();
+    addSpecialDayTemplate(title, description);
+    saveData();
+    root.innerHTML = "";
+    renderSettings();
+  };
+}
+
 function addPlancheTemplateGoal(){
   const goal = {
     id: uid("goal"),
@@ -1854,6 +2131,24 @@ function renderSettings(){
       ${isDayMapDefault() ? "" : `<button class="btn small ghost" id="resetDaysBtn" style="margin-top:8px;">Restore original day order</button>`}
     </div>
 
+    <div class="card">
+      <div class="settings-row">
+        <div>
+          <div class="lbl">Special Training Days</div>
+          <div class="desc">Reusable templates you can swap in for any day's normal workout - from Today or the History calendar.</div>
+        </div>
+      </div>
+      ${DATA.specialDays.length ? DATA.specialDays.map(s=>`
+        <div class="settings-row">
+          <div>
+            <div class="lbl" style="font-size:13.5px;font-weight:600;">${s.title}</div>
+            ${s.description ? `<div class="desc">${s.description}</div>` : ""}
+          </div>
+          <button class="btn small ghost" data-delspecial="${s.id}">Delete</button>
+        </div>`).join("") : `<div style="font-size:12.5px;color:var(--muted);margin-top:6px;">None yet.</div>`}
+      <button class="btn block" id="newSpecialBtn" style="margin-top:10px;">+ New special training day</button>
+    </div>
+
     ${removedExercisesSummary()}
 
     <div class="card">
@@ -1961,6 +2256,17 @@ function renderSettings(){
       renderSettings();
     };
   });
+  document.getElementById("newSpecialBtn").onclick = ()=> showNewSpecialModal();
+  view.querySelectorAll("[data-delspecial]").forEach(btn=>{
+    btn.onclick = ()=>{
+      const id = btn.getAttribute("data-delspecial");
+      const tmpl = DATA.specialDays.find(s=>s.id===id);
+      if(!confirm(`Delete "${tmpl?tmpl.title:'this'}"? Days already completed with it keep their record either way.`)) return;
+      deleteSpecialDayTemplate(id);
+      saveData();
+      renderSettings();
+    };
+  });
   document.getElementById("exportBtn").onclick = async ()=>{
     const blob = new Blob([JSON.stringify(DATA,null,2)], {type:"application/json"});
     const fileName = "workout-data-backup-"+dateKey(todayDate())+".json";
@@ -2016,7 +2322,7 @@ function renderSettings(){
   };
   document.getElementById("resetBtn").onclick = ()=>{
     if(confirm("Erase all workout history, streaks, and badges? This can't be undone.")){
-      DATA = {logs:{}, settings:{weekOverride:"auto"}, earnedBadges:{}, goals:[]};
+      DATA = {logs:{}, settings:{weekOverride:"auto", scheduledSpecialDays:{}}, earnedBadges:{}, goals:[], specialDays:[]};
       saveData();
       showSimpleToast("Reset complete", "Starting fresh.");
       renderSettings();
@@ -2027,7 +2333,7 @@ function renderSettings(){
 /* ============================= TAB SWITCHING ============================= */
 function renderTab(tab){
   activeTab = tab;
-  if(tab!=="today"){ editingExId = null; addingExercise = false; addingCardioFor = null; }
+  if(tab!=="today"){ editingExId = null; addingExercise = false; addingCardioFor = null; specialDraft = null; }
   document.querySelectorAll("nav.tabbar button").forEach(b=>{
     b.classList.toggle("active", b.getAttribute("data-tab")===tab);
   });
