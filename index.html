@@ -114,6 +114,8 @@
   .cal-cell.missed{background:#FBE7E6;color:var(--red);}
   .cal-cell.today{box-shadow:0 0 0 2px var(--navy) inset;}
   .cal-cell.future{background:#F4F7FA;color:#C3CBD3;}
+  .special-mark{position:absolute;top:1px;right:2px;font-size:9px;line-height:1;}
+  .special-mark.dim{opacity:.45;}
   .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:11px;color:var(--muted);margin-top:10px;}
   .legend span{display:inline-flex;align-items:center;gap:4px;}
   .dot{width:9px;height:9px;border-radius:3px;display:inline-block;}
@@ -290,16 +292,48 @@ const BADGES = [
   {id:"w50",        ic:"🏆", name:"50 Workouts",      desc:"Log 50 total workouts", check:(s)=>s.totalWorkouts>=50, prog:(s)=>[s.totalWorkouts,50]},
   {id:"w100",       ic:"👑", name:"100 Workouts",     desc:"Log 100 total workouts", check:(s)=>s.totalWorkouts>=100, prog:(s)=>[s.totalWorkouts,100]},
   {id:"perfectweek", ic:"⭐", name:"Perfect Week",    desc:"All 6 training days done in one calendar week", check:(s)=>s.perfectWeeks>=1},
-  {id:"dist5",      ic:"🏃", name:"5 Mile Club",      desc:"5 total cardio miles logged", check:(s)=>s.totalMiles>=5, prog:(s)=>[s.totalMiles.toFixed(1),5]},
-  {id:"dist10",     ic:"🚴", name:"10 Mile Club",     desc:"10 total cardio miles logged", check:(s)=>s.totalMiles>=10, prog:(s)=>[s.totalMiles.toFixed(1),10]},
-  {id:"dist26",     ic:"🎽", name:"Marathon Club",    desc:"26.2 total cardio miles logged", check:(s)=>s.totalMiles>=26.2, prog:(s)=>[s.totalMiles.toFixed(1),26.2]},
-  {id:"dist50",     ic:"🌊", name:"50 Mile Club",     desc:"50 total cardio miles logged", check:(s)=>s.totalMiles>=50, prog:(s)=>[s.totalMiles.toFixed(1),50]},
   {id:"triple",     ic:"🎯", name:"Triple Threat",    desc:"Log a run, a bike, and a swim", check:(s)=>s.cardioTypes.size>=3, prog:(s)=>[s.cardioTypes.size,3]},
   {id:"goalCreated", ic:"🎯", name:"Goal Setter",     desc:"Create a custom goal", check:(s)=>s.goalsCreated>=1},
   {id:"goalHalfway", ic:"📈", name:"Halfway There",   desc:"Reach 50% progress on a goal", check:(s)=>s.maxGoalProgress>=0.5},
   {id:"goalMet",     ic:"🥇", name:"Goal Crusher",    desc:"Fully complete a custom goal", check:(s)=>s.goalsCompleted>=1},
   {id:"goal3",       ic:"👑", name:"Goal Machine",    desc:"Complete 3 custom goals", check:(s)=>s.goalsCompleted>=3, prog:(s)=>[s.goalsCompleted,3]},
+  ...buildCardioBadges(),
 ];
+// Separate per-activity badge tracks (run/bike in miles, swim in km) instead
+// of one combined "cardio miles" pool - a cumulative-total tier per type,
+// plus a sustained-effort tier for holding a weekly average over the
+// trailing 13 weeks (~3 months). Generated rather than hand-written to
+// keep 30 near-identical entries consistent and typo-free.
+function buildCardioBadges(){
+  const tiers = [5,10,25,50,100];
+  const types = [
+    {type:"Run",  ic:"🏃", unit:"mi", unitWord:"miles"},
+    {type:"Bike", ic:"🚴", unit:"mi", unitWord:"miles"},
+    {type:"Swim", ic:"🏊", unit:"km", unitWord:"km"},
+  ];
+  const badges = [];
+  types.forEach(({type,ic,unit,unitWord})=>{
+    tiers.forEach(tier=>{
+      badges.push({
+        id:`${type.toLowerCase()}_total_${tier}`, ic,
+        name:`${tier} ${unit==="mi"?"Mile":"Kilometer"} ${type}`,
+        desc:`Log ${tier} total ${unitWord} of ${type.toLowerCase()}ing`,
+        check:(s)=>(s.cardioTotals[type]||0)>=tier,
+        prog:(s)=>[(s.cardioTotals[type]||0).toFixed(1), tier],
+      });
+    });
+    tiers.forEach(tier=>{
+      badges.push({
+        id:`${type.toLowerCase()}_avg13wk_${tier}`, ic:"📅",
+        name:`${tier} ${unit}/wk ${type} · 3mo`,
+        desc:`Average ${tier} ${unitWord}/week of ${type.toLowerCase()}ing over the last 13 weeks`,
+        check:(s)=>(s.cardioWeeklyAvg[type]||0)>=tier,
+        prog:(s)=>[(s.cardioWeeklyAvg[type]||0).toFixed(1), tier],
+      });
+    });
+  });
+  return badges;
+}
 
 /* ============================= GOAL TEMPLATES ============================= */
 const PLANCHE_GOAL_TEMPLATE = {
@@ -319,21 +353,44 @@ const PLANCHE_GOAL_TEMPLATE = {
 /* ============================= STORAGE ============================= */
 const STORE_KEY = "calisthenicsPlanData_v1";
 const DEFAULT_DAY_MAP = {1:1,2:2,3:3,4:4,5:5,6:6};
+const DEFAULT_WEEK_CYCLE = {count:2, keys:["A","B"], names:{A:"A",B:"B"}, override:"auto"};
 function loadData(){
   try{
     const raw = localStorage.getItem(STORE_KEY);
     if(raw) return JSON.parse(raw);
   }catch(e){}
-  return {logs:{}, settings:{weekOverride:"auto", dayMap:{...DEFAULT_DAY_MAP}, exerciseOverrides:{}, customExercises:{}, removedExerciseIds:{}, weightTracking:{}}, earnedBadges:{}, goals:[]};
+  return {logs:{}, settings:{dayMapByWeek:{}, exerciseOverrides:{}, customExercises:{}, removedExerciseIds:{}, weightTracking:{}, weekCycle:{count:2, keys:["A","B"], names:{A:"A",B:"B"}, override:"auto"}, scheduledSpecialDays:{}}, earnedBadges:{}, goals:[], specialDays:[]};
 }
 function saveData(){ localStorage.setItem(STORE_KEY, JSON.stringify(DATA)); }
+// Fills in fields that didn't exist in older saves/backups, so loading one never
+// crashes on a missing key. Called once at startup and again after importing a
+// backup file (which may predate any of these features).
+function migrateData(){
+  if(!DATA.settings.exerciseOverrides) DATA.settings.exerciseOverrides = {};
+  if(!DATA.settings.customExercises) DATA.settings.customExercises = {};
+  if(!DATA.settings.removedExerciseIds) DATA.settings.removedExerciseIds = {};
+  if(!DATA.settings.weightTracking) DATA.settings.weightTracking = {};
+  if(!DATA.settings.weekCycle || !Array.isArray(DATA.settings.weekCycle.keys) || DATA.settings.weekCycle.keys.length < 1){
+    DATA.settings.weekCycle = {count:2, keys:["A","B"], names:{A:"A",B:"B"}, override:"auto"};
+  }
+  if(!DATA.settings.weekCycle.names) DATA.settings.weekCycle.names = {};
+  if(DATA.settings.weekCycle.count !== DATA.settings.weekCycle.keys.length) DATA.settings.weekCycle.count = DATA.settings.weekCycle.keys.length;
+  // Day-swapping used to be one global map shared by every week. Migrate it into the
+  // new per-week scheme once, so an existing swap keeps working the same way for
+  // whichever weeks already exist; weeks added after this point start fresh and can
+  // be customized independently (see dayMapForWeek()/addWeekToCycle()).
+  if(!DATA.settings.dayMapByWeek){
+    DATA.settings.dayMapByWeek = {};
+    if(DATA.settings.dayMap){
+      DATA.settings.weekCycle.keys.forEach(k=>{ DATA.settings.dayMapByWeek[k] = {...DATA.settings.dayMap}; });
+    }
+  }
+  if(!DATA.settings.scheduledSpecialDays) DATA.settings.scheduledSpecialDays = {};
+  if(!DATA.specialDays) DATA.specialDays = [];
+  if(!DATA.goals) DATA.goals = [];
+}
 let DATA = loadData();
-if(!DATA.settings.dayMap) DATA.settings.dayMap = {...DEFAULT_DAY_MAP};
-if(!DATA.settings.exerciseOverrides) DATA.settings.exerciseOverrides = {};
-if(!DATA.settings.customExercises) DATA.settings.customExercises = {};
-if(!DATA.settings.removedExerciseIds) DATA.settings.removedExerciseIds = {};
-if(!DATA.settings.weightTracking) DATA.settings.weightTracking = {};
-if(!DATA.goals) DATA.goals = [];
+migrateData();
 
 /* ============================= HELPERS ============================= */
 function pad(n){ return n<10 ? "0"+n : ""+n; }
@@ -347,39 +404,137 @@ function getWeekNumber(d){
   const yearStart = new Date(Date.UTC(dt.getUTCFullYear(),0,1));
   return Math.ceil((((dt-yearStart)/86400000)+1)/7);
 }
-function weekLetterFor(d){
-  if(DATA.settings.weekOverride && DATA.settings.weekOverride!=="auto") return DATA.settings.weekOverride;
-  return (getWeekNumber(d) % 2 === 0) ? "A" : "B";
+// A handful of distinct accent colors for week badges, keyed by position in
+// the cycle (not by display name, since those are free-form and can't
+// safely be used as CSS class names - e.g. "Week 3" contains a space).
+// First two match the original --weekA/--weekB hex values exactly, so a
+// fresh install (or an unchanged A/B cycle) looks identical to before.
+const WEEK_COLORS = ["#F6A24A", "#4A90D9", "#8E6FD1", "#3FB372", "#D96B9A", "#56C2C0"];
+// weekCycle().keys are STABLE identifiers used for all `week:` tag matching
+// (on PLAN items and custom exercises) - they're generated once and never
+// change. weekCycle().names maps each key to the user-facing, freely
+// renameable display text. Keeping these separate means renaming a week
+// never breaks its link to the stock plan's hardcoded "A"/"B" tags or to
+// any exercise already tagged with that key.
+function weekCycle(){ return DATA.settings.weekCycle || DEFAULT_WEEK_CYCLE; }
+function weekName(key){ const wc = weekCycle(); return (wc.names && wc.names[key]) || key; }
+function weekColor(key){
+  const idx = weekCycle().keys.indexOf(key);
+  return WEEK_COLORS[idx>=0 ? idx % WEEK_COLORS.length : 0];
+}
+function weekLabelFor(d){
+  const wc = weekCycle();
+  if(wc.override && wc.override!=="auto" && wc.keys.includes(wc.override)) return wc.override;
+  return wc.keys[getWeekNumber(d) % wc.count];
+}
+function isWeekCycleDefault(){
+  const wc = weekCycle();
+  return wc.count===2 && wc.keys.length===2 && wc.keys[0]==="A" && wc.keys[1]==="B";
+}
+function renameWeek(key, newName){
+  const wc = weekCycle();
+  if(!wc.names) wc.names = {};
+  wc.names[key] = newName;
+}
+// Adds one more week to the end of the cycle, seeded as an exact copy of
+// the week from two slots back (so e.g. a 3rd week copies week 1, a 4th
+// copies week 2) per how the user wants new weeks to start - as a full
+// clone to edit from, not an empty "every week only" week. Falls back to
+// copying the most recent week if there's no "two back" week yet. The new
+// week's key is a fresh uid (never reused), so removing and re-adding
+// weeks can't accidentally collide with orphaned data from an earlier key.
+function addWeekToCycle(){
+  const wc = weekCycle();
+  const oldCount = wc.count;
+  const sourceIdx = oldCount - 2;
+  const sourceKey = wc.keys[sourceIdx >= 0 ? sourceIdx : oldCount-1];
+  const newKey = uid("wk");
+  wc.keys.push(newKey);
+  wc.count = wc.keys.length;
+  if(!wc.names) wc.names = {};
+  wc.names[newKey] = "Week " + (oldCount+1);
+  seedWeekFromSource(newKey, sourceKey);
+  setDayMapForWeek(newKey, {...dayMapForWeek(sourceKey)});
+}
+// Removes the most recently added week from the cycle. Any exercises the
+// user had added to that week are left in storage (not deleted) - they
+// just stop appearing, the same way shrinking the day map or removing an
+// exercise never destroys data, only hides it. Re-adding a week later
+// never revives them, since a fresh unique key is always generated.
+function removeLastWeekFromCycle(){
+  const wc = weekCycle();
+  if(wc.count <= 1) return;
+  const removedKey = wc.keys.pop();
+  wc.count = wc.keys.length;
+  if(wc.override===removedKey) wc.override = "auto";
+  if(wc.names) delete wc.names[removedKey];
+  if(DATA.settings.dayMapByWeek) delete DATA.settings.dayMapByWeek[removedKey];
+}
+function resetWeekCycle(){
+  DATA.settings.weekCycle = {count:2, keys:["A","B"], names:{A:"A",B:"B"}, override:"auto"};
+}
+// Clones every exercise specific to `sourceKey` (stock plan items and any
+// already-added custom ones) into `newKey`, for every weekday. Items
+// tagged "both" aren't cloned - they already show on every week, including
+// the new one, with no copy needed. Clones use each item's current
+// *effective* sets/reps/weight (including any overrides), baked directly
+// into the clone's name/sr text, so the new week starts as an independent
+// snapshot - editing the clone later never touches the original week.
+function seedWeekFromSource(newKey, sourceKey){
+  for(let dow=1; dow<=6; dow++){
+    const plan = PLAN[dow];
+    if(!plan) continue;
+    const stockSource = plan.items.filter(it => it.week===sourceKey && !isRemoved(it.id));
+    const customSource = customExercisesFor(dow).filter(it => it.week===sourceKey && !isRemoved(it.id));
+    [...stockSource, ...customSource].forEach(it=>{
+      const effW = effectiveWeight(it);
+      const name = effW.weight!=null ? nameWithWeight(it.name, effW.weight) : it.name;
+      const eff = effectiveSR(it);
+      addCustomExercise(dow, {id:uid("wk"), name, sr:eff.sr, notes:it.notes||"", url:it.url||"", week:newKey, custom:true});
+    });
+  }
 }
 const DOW_NAMES = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
 const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 
-function mappedDow(dow){
+// Day-swapping is scoped per week in the rotation (see the migration note above):
+// swapping Monday and Wednesday in Week 3 has no effect on Week 1/2/4/etc. unless
+// they were also swapped. `weekKey` is one of weekCycle().keys, or omitted/"auto"
+// for callers (like Today) that already know the key for the date in question.
+function dayMapForWeek(weekKey){
+  if(!DATA.settings.dayMapByWeek) DATA.settings.dayMapByWeek = {};
+  return DATA.settings.dayMapByWeek[weekKey] || DEFAULT_DAY_MAP;
+}
+function setDayMapForWeek(weekKey, map){
+  if(!DATA.settings.dayMapByWeek) DATA.settings.dayMapByWeek = {};
+  DATA.settings.dayMapByWeek[weekKey] = map;
+}
+function isDayMapDefaultForWeek(weekKey){
+  const map = dayMapForWeek(weekKey);
+  return [1,2,3,4,5,6].every(k => (map[k]||k) === DEFAULT_DAY_MAP[k]);
+}
+function mappedDow(dow, weekKey){
   if(dow===0) return 0; // Sunday is always the rest day, never swappable
-  const map = DATA.settings.dayMap;
+  const map = dayMapForWeek(weekKey);
   return (map && map[dow]) ? map[dow] : dow;
 }
-function planFor(d){ return PLAN[mappedDow(d.getDay())]; }
-function swappableDayOptions(){
+function planFor(d){ return PLAN[mappedDow(d.getDay(), weekLabelFor(d))]; }
+function swappableDayOptions(weekKey){
   let html = "";
   for(let dow=1; dow<=6; dow++){
-    const plan = PLAN[mappedDow(dow)];
+    const plan = PLAN[mappedDow(dow, weekKey)];
     const label = DOW_NAMES[dow] + (plan ? " — " + plan.title : " — Rest");
     html += `<option value="${dow}">${label}</option>`;
   }
   return html;
 }
-function dayOrderSummary(){
+function dayOrderSummary(weekKey){
   let rows = "";
   for(let dow=1; dow<=6; dow++){
-    const plan = PLAN[mappedDow(dow)];
+    const plan = PLAN[mappedDow(dow, weekKey)];
     rows += `${DOW_NAMES[dow]}: ${plan ? plan.title + (plan.subtitle? " · "+plan.subtitle : "") : "Rest"}<br>`;
   }
   return rows;
-}
-function isDayMapDefault(){
-  const map = DATA.settings.dayMap || DEFAULT_DAY_MAP;
-  return [1,2,3,4,5,6].every(k => (map[k]||k) === DEFAULT_DAY_MAP[k]);
 }
 /* ============================= SETS/REPS CUSTOMIZATION ============================= */
 // Parses a leading "N x M" (or "N-N2 x M-M2") pattern out of a plan item's "sr" string,
@@ -438,18 +593,28 @@ function effectiveWeight(it){
 function nameWithWeight(name, weight){
   return name.replace(/(\d+(?:\.\d+)?)(\s*lb\b)/i, (m, num, rest) => weight + rest);
 }
-function itemsFor(plan, weekLetter, planSlot){
-  const stock = plan.items.filter(it => it.week==="both" || it.week===weekLetter);
-  const custom = planSlot!=null ? customExercisesFor(planSlot).filter(it => it.week==="both" || it.week===weekLetter) : [];
-  return [...stock, ...custom].filter(it => !isRemoved(it.id)).map(it=>{
-    const eff = effectiveSR(it);
-    const effW = effectiveWeight(it);
-    const name = effW.weight!=null ? nameWithWeight(it.name, effW.weight) : it.name;
-    const merged = {...it, name, sr:eff.sr, _sets:eff.sets, _reps:eff.reps, _isTime:eff.isTime,
-      _editable:eff.editable, _customized:eff.customized || effW.customized, _custom:!!it.custom,
-      _weight:effW.weight, _weightEditable:effW.editable, _weightCustomized:effW.customized};
-    merged._progressionDue = progressionReminderDue(merged);
-    return merged;
+function decorateItem(it){
+  const eff = effectiveSR(it);
+  const effW = effectiveWeight(it);
+  const name = effW.weight!=null ? nameWithWeight(it.name, effW.weight) : it.name;
+  const merged = {...it, name, sr:eff.sr, _sets:eff.sets, _reps:eff.reps, _isTime:eff.isTime,
+    _editable:eff.editable, _customized:eff.customized || effW.customized, _custom:!!it.custom,
+    _weight:effW.weight, _weightEditable:effW.editable, _weightCustomized:effW.customized};
+  merged._progressionDue = progressionReminderDue(merged);
+  return merged;
+}
+function itemsFor(plan, weekKey, planSlot){
+  const stock = plan.items.filter(it => it.week==="both" || it.week===weekKey);
+  const custom = planSlot!=null ? customExercisesFor(planSlot).filter(it => it.week==="both" || it.week===weekKey) : [];
+  return [...stock, ...custom].filter(it => !isRemoved(it.id)).map(decorateItem);
+}
+// One-time exercises (added "just today") aren't tied to a weekday/week template at
+// all, so they bypass itemsFor entirely - merged in by the caller for one specific date.
+function oneTimeItemsFor(log){
+  return oneTimeExercisesFor(log).map(it=>{
+    const decorated = decorateItem(it);
+    decorated._oneTime = true;
+    return decorated;
   });
 }
 /* ============================= WEIGHT PROGRESSION TRACKING ============================= */
@@ -489,6 +654,19 @@ function addCustomExercise(planSlot, ex){
 function removeCustomExercise(planSlot, id){
   const list = DATA.settings.customExercises && DATA.settings.customExercises[planSlot];
   if(list) DATA.settings.customExercises[planSlot] = list.filter(e=>e.id!==id);
+}
+// One-time exercises live on the day's own log entry (not settings.customExercises,
+// which is keyed by weekday/week and recurs forever) - a single-occurrence addition
+// that never shows up again on a future visit to this weekday.
+function oneTimeExercisesFor(log){
+  return (log && log.oneTimeExercises) || [];
+}
+function addOneTimeExercise(log, ex){
+  if(!log.oneTimeExercises) log.oneTimeExercises = [];
+  log.oneTimeExercises.push(ex);
+}
+function removeOneTimeExercise(log, id){
+  if(log.oneTimeExercises) log.oneTimeExercises = log.oneTimeExercises.filter(e=>e.id!==id);
 }
 function isRemoved(id){
   return !!(DATA.settings.removedExerciseIds && DATA.settings.removedExerciseIds[id]);
@@ -535,9 +713,9 @@ function estimateWorkoutSeconds(items, log){
   let total = 0;
   items.forEach(it=>{
     if(it.type==="cardio"){
-      const c = log && log.cardio && log.cardio[it.id];
-      if(c && c.duration){
-        total += (parseFloat(c.duration)||0) * 60;
+      const entries = log ? cardioEntriesFor(log, it.id) : [];
+      if(entries.length){
+        entries.forEach(c=>{ total += (parseFloat(c.duration)||0) * 60; });
       } else {
         const m = it.sr.match(/(\d+)(?:-(\d+))?\s*min/i);
         if(m){
@@ -564,38 +742,220 @@ function logFor(dateStr){
   if(!DATA.logs[dateStr].exerciseSnapshots) DATA.logs[dateStr].exerciseSnapshots = {};
   return DATA.logs[dateStr];
 }
-function milesFromEntry(c){
-  if(!c) return 0;
-  let d = parseFloat(c.distance)||0;
-  if(c.unit==="km") d = d*0.621371;
-  return d;
+// log.cardio[id] holds an array of logged entries (one per cardio session
+// logged that day, so e.g. a bike ride AND a swim can both be logged under
+// the same "run/bike/swim" slot). Older saves had a single flat object
+// instead of an array - this normalizes either shape to an array.
+function cardioEntriesFor(log, id){
+  const v = log && log.cardio && log.cardio[id];
+  if(!v) return [];
+  return Array.isArray(v) ? v : [v];
+}
+// Distance in a type-appropriate unit: miles for Run/Bike, kilometers for
+// Swim (independent unit systems, per design - see IMPLEMENTATION_PLAN.md).
+function cardioDistanceFor(entry){
+  if(!entry) return 0;
+  const d = parseFloat(entry.distance)||0;
+  if(entry.type==="Swim"){
+    const meters = entry.unit==="yd" ? d*0.9144 : d;
+    return meters/1000;
+  }
+  return entry.unit==="km" ? d*0.621371 : d;
+}
+function metersForSwim(entry){
+  const d = parseFloat(entry.distance)||0;
+  return entry.unit==="yd" ? d*0.9144 : d;
+}
+function formatPaceSeconds(totalSeconds, unitLabel){
+  if(!totalSeconds || !isFinite(totalSeconds) || totalSeconds<=0) return null;
+  const m = Math.floor(totalSeconds/60);
+  const s = Math.round(totalSeconds%60);
+  return `${m}:${s<10?"0":""}${s} /${unitLabel}`;
+}
+function formatAvgSpeed(distance, durationMin, unitLabel){
+  if(!durationMin || durationMin<=0 || !distance) return null;
+  return `${(distance/(durationMin/60)).toFixed(1)} ${unitLabel}`;
+}
+function formatAvgPace(distance, durationMin, unitLabel){
+  if(!distance || !durationMin || durationMin<=0) return null;
+  return formatPaceSeconds((durationMin*60)/distance, unitLabel);
+}
+function formatSwim100Pace(entry){
+  const meters = metersForSwim(entry);
+  const durationMin = parseFloat(entry.duration)||0;
+  if(!meters || !durationMin) return null;
+  return formatPaceSeconds(((durationMin*60)/meters)*100, "100m");
+}
+// Rolling average of the trailing 13 calendar weeks (~3 months), ending
+// with the current week. Weeks with no activity count as 0, so the
+// average reflects sustained effort, not a few good weeks - matches
+// "reached a weekly average and held it for 3 months."
+function trailing13WeekAverage(weekTotals){
+  let total = 0;
+  let d = todayDate();
+  for(let i=0;i<13;i++){
+    const wk = d.getFullYear()+"-"+getWeekNumber(d);
+    total += weekTotals[wk] || 0;
+    d = addDays(d, -7);
+  }
+  return total/13;
+}
+// One logged cardio entry's stats line: distance/time plus whatever
+// averages its type supports. Run/Bike show avg speed + avg pace plus the
+// user-entered max speed; Swim shows avg pace per 100m plus the
+// user-entered best 100m pace, normalizing yards to meters first.
+function cardioStatsLine(c){
+  const dist = `${c.distance} ${c.unit}`;
+  const dur = `${c.duration} min`;
+  let extra = "";
+  if(c.type==="Swim"){
+    const avgPace = formatSwim100Pace(c);
+    if(avgPace) extra += ` · Avg ${avgPace}`;
+    if(c.bestPace100Sec!=null) extra += ` · Best ${formatPaceSeconds(c.bestPace100Sec,"100m")}`;
+  } else {
+    const unitLabel = c.unit==="km" ? "km/h" : "mph";
+    const speed = formatAvgSpeed(parseFloat(c.distance)||0, parseFloat(c.duration)||0, unitLabel);
+    const pace = formatAvgPace(parseFloat(c.distance)||0, parseFloat(c.duration)||0, c.unit);
+    if(speed) extra += ` · Avg ${speed}`;
+    if(pace) extra += ` · ${pace}`;
+    if(c.maxSpeed!=null) extra += ` · Max ${c.maxSpeed} ${unitLabel}`;
+  }
+  return `${dist} · ${dur}${extra}`;
+}
+// `showCancel` renders a compact Save+Cancel row (used for "add another
+// entry", where there's something to cancel back to); without it, Save
+// renders as the original full-width block button (first/only entry).
+function cardioFormHtml(id, showCancel){
+  return `
+    <div class="seg" data-cardiotype="${id}">
+      <button data-val="Run">🏃 Run</button>
+      <button data-val="Bike">🚴 Bike</button>
+      <button data-val="Swim">🏊 Swim</button>
+    </div>
+    <div class="row2" style="margin-top:8px;">
+      <div class="field"><label>Distance</label><input type="number" inputmode="decimal" step="0.1" min="0" id="dist_${id}" placeholder="e.g. 2.5"></div>
+      <div class="field"><label>Unit</label>
+        <select id="unit_${id}"><option value="mi">mi</option><option value="km">km</option></select>
+      </div>
+    </div>
+    <div class="field" style="margin-top:8px;"><label>Time (minutes)</label><input type="number" inputmode="numeric" min="0" id="dur_${id}" placeholder="e.g. 25"></div>
+    <div class="field" style="margin-top:8px;" data-speedfield="${id}">
+      <label id="speedlabel_${id}">Max speed (mph)</label>
+      <input type="number" inputmode="decimal" step="0.1" min="0" id="maxspeed_${id}" placeholder="optional">
+    </div>
+    <div class="row2 hidden" style="margin-top:8px;" data-pacefield="${id}">
+      <div class="field"><label>Best 100m pace - min</label><input type="number" inputmode="numeric" min="0" id="pacemin_${id}" placeholder="optional"></div>
+      <div class="field"><label>sec</label><input type="number" inputmode="numeric" min="0" max="59" id="pacesec_${id}" placeholder="optional"></div>
+    </div>
+    ${showCancel ? `
+    <div style="display:flex;gap:8px;margin-top:8px;">
+      <button class="btn small" data-savecardio="${id}">Save cardio</button>
+      <button class="btn small ghost" data-cancelcardio="${id}">Cancel</button>
+    </div>` : `<button class="btn block" data-savecardio="${id}" style="margin-top:8px;">Save cardio</button>`}
+  `;
 }
 function uid(prefix){ return prefix+"_"+Date.now().toString(36)+"_"+Math.random().toString(36).slice(2,7); }
 function goalProgress(g){ return g.milestones.length ? g.milestones.filter(m=>m.done).length / g.milestones.length : 0; }
 function isGoalComplete(g){ return g.milestones.length>0 && g.milestones.every(m=>m.done); }
+
+/* ============================= SPECIAL TRAINING DAYS ============================= */
+// DATA.specialDays holds reusable templates (title + optional description).
+// DATA.settings.scheduledSpecialDays maps a specific calendar date to a
+// template id - a one-time replacement of that date's normal plan, unlike
+// exerciseOverrides/customExercises which apply to a recurring weekday.
+// specialDayFor() is the single source of truth for "is this date special,
+// and what should it show": once a day is completed, it returns the frozen
+// log fields (title/description copied at completion time) rather than the
+// live template, so editing or deleting a template later never rewrites
+// history - same principle as exercise snapshots.
+function specialDayFor(key){
+  const log = DATA.logs[key];
+  if(log && log.specialDayId){
+    return {id:log.specialDayId, title:log.specialTitle||"Special Training Day", description:log.specialDescription||"", frozen:true};
+  }
+  const schedId = DATA.settings.scheduledSpecialDays && DATA.settings.scheduledSpecialDays[key];
+  if(!schedId) return null;
+  const tmpl = DATA.specialDays.find(s=>s.id===schedId);
+  if(!tmpl) return null;
+  return {id:tmpl.id, title:tmpl.title, description:tmpl.description||"", frozen:false};
+}
+function scheduleSpecialDay(dateStr, specialDayId){
+  if(!DATA.settings.scheduledSpecialDays) DATA.settings.scheduledSpecialDays = {};
+  DATA.settings.scheduledSpecialDays[dateStr] = specialDayId;
+}
+function unscheduleSpecialDay(dateStr){
+  if(DATA.settings.scheduledSpecialDays) delete DATA.settings.scheduledSpecialDays[dateStr];
+}
+function addSpecialDayTemplate(title, description){
+  const tmpl = {id:uid("special"), title, description, createdAt:Date.now()};
+  DATA.specialDays.push(tmpl);
+  return tmpl;
+}
+// Deleting a template also clears any not-yet-completed scheduled dates
+// pointing at it, so specialDayFor() never has to fall back to a dangling
+// reference. Completed (frozen) days are untouched - they don't depend on
+// the template existing anymore.
+function deleteSpecialDayTemplate(id){
+  DATA.specialDays = DATA.specialDays.filter(s=>s.id!==id);
+  const sched = DATA.settings.scheduledSpecialDays || {};
+  Object.keys(sched).forEach(dateStr=>{
+    if(sched[dateStr]===id){
+      const log = DATA.logs[dateStr];
+      if(!log || !log.fullyCompleted) delete sched[dateStr];
+    }
+  });
+}
 
 /* ============================= STATE ============================= */
 let activeTab = "today";
 let historyMonthOffset = 0; // 0 = current month
 let editingExId = null; // id of the exercise currently showing the sets/reps editor on Today
 let addingExercise = false; // whether the "add exercise" form is open on Today
+let addingCardioFor = null; // id of the cardio exercise currently showing the "add an entry" form
+let specialDraft = null; // {notes, activities:[{id,title,description}]} while editing a special day on Today
+let swapWeekSelected = null; // which week's current day order the "Swap workout days" card is viewing/resetting
+let swapSideAWeek = null; // week picked for side A of the swap (may differ from side B - cross-week swap)
+let swapSideBWeek = null; // week picked for side B of the swap
 
 /* ============================= STATS COMPUTATION ============================= */
 function computeStats(){
   const logs = DATA.logs;
-  let totalWorkouts=0, totalMiles=0;
+  let totalWorkouts=0;
   const cardioTypes = new Set();
+  const cardioTotals = {Run:0, Bike:0, Swim:0}; // miles for Run/Bike, km for Swim
+  const weeklyByType = {Run:{}, Bike:{}, Swim:{}}; // type -> "year-weekNum" -> distance that week
   const completedDates = [];
   for(const k in logs){
     const l = logs[k];
     if(l.fullyCompleted){ totalWorkouts++; completedDates.push(k); }
-    if(l.cardio){ totalMiles += milesFromEntry(l.cardio); if(l.cardio.type) cardioTypes.add(l.cardio.type); }
+    if(l.cardio){
+      for(const id in l.cardio){
+        cardioEntriesFor(l, id).forEach(entry=>{
+          if(!entry || !entry.type) return;
+          cardioTypes.add(entry.type);
+          const val = cardioDistanceFor(entry);
+          if(cardioTotals[entry.type]!=null) cardioTotals[entry.type] += val;
+          const d = new Date(k+"T00:00:00");
+          const wk = d.getFullYear()+"-"+getWeekNumber(d);
+          if(!weeklyByType[entry.type]) weeklyByType[entry.type] = {};
+          weeklyByType[entry.type][wk] = (weeklyByType[entry.type][wk]||0) + val;
+        });
+      }
+    }
   }
+  const totalMiles = cardioTotals.Run + cardioTotals.Bike;
+  const cardioWeeklyAvg = {
+    Run: trailing13WeekAverage(weeklyByType.Run),
+    Bike: trailing13WeekAverage(weeklyByType.Bike),
+    Swim: trailing13WeekAverage(weeklyByType.Swim),
+  };
   completedDates.sort();
 
-  // streaks over scheduled days (Mon-Sat), Sunday never breaks streak
+  // streaks over scheduled days (Mon-Sat), Sunday never breaks streak -
+  // unless that specific Sunday was completed as a special training day,
+  // in which case it counts like any other scheduled day.
   function isCompleted(dateStr){ return logs[dateStr] && logs[dateStr].fullyCompleted; }
-  function scheduledDow(dow){ return dow !== 0; }
+  function scheduledDow(dow, key){ return dow !== 0 || !!(logs[key] && logs[key].specialDayId); }
 
   // current streak: walk backward from today
   let cur = 0;
@@ -604,8 +964,8 @@ function computeStats(){
   if(!isCompleted(dateKey(cursor))) cursor = addDays(cursor,-1);
   while(true){
     const dow = cursor.getDay();
-    if(!scheduledDow(dow)){ cursor = addDays(cursor,-1); continue; }
     const key = dateKey(cursor);
+    if(!scheduledDow(dow, key)){ cursor = addDays(cursor,-1); continue; }
     if(isCompleted(key)){ cur++; cursor = addDays(cursor,-1); }
     else break;
     if(cur>3650) break;
@@ -620,8 +980,9 @@ function computeStats(){
     let d = new Date(first);
     while(d<=last){
       const dow = d.getDay();
-      if(scheduledDow(dow)){
-        if(isCompleted(dateKey(d))) { run++; longest=Math.max(longest,run); }
+      const key = dateKey(d);
+      if(scheduledDow(dow, key)){
+        if(isCompleted(key)) { run++; longest=Math.max(longest,run); }
         else run = 0;
       }
       d = addDays(d,1);
@@ -646,7 +1007,7 @@ function computeStats(){
   const goalsCompleted = DATA.goals.filter(isGoalComplete).length;
   const maxGoalProgress = DATA.goals.reduce((mx,g)=>Math.max(mx, goalProgress(g)), 0);
 
-  return {totalWorkouts, totalMiles, cardioTypes, longestStreak:longest, currentStreak:cur, perfectWeeks,
+  return {totalWorkouts, totalMiles, cardioTypes, cardioTotals, cardioWeeklyAvg, longestStreak:longest, currentStreak:cur, perfectWeeks,
     goalsCreated, goalsCompleted, maxGoalProgress};
 }
 
@@ -705,16 +1066,28 @@ function renderToday(){
   const d = todayDate();
   const key = dateKey(d);
   const dow = d.getDay();
-  const planSlot = mappedDow(dow);
+  const weekLabel = weekLabelFor(d);
+  const planSlot = mappedDow(dow, weekLabel);
   const plan = PLAN[planSlot];
-  const weekLetter = weekLetterFor(d);
   const log = logFor(key);
-  log.dow = dow; log.week = plan && plan.hasAlt ? weekLetter : null;
+  log.dow = dow; log.week = plan && plan.hasAlt ? weekLabel : null;
 
   document.getElementById("hdrTitle").innerHTML = `<h1>${DOW_NAMES[dow]}</h1>`;
   const dstr = `${MONTH_NAMES[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
+
+  const special = specialDayFor(key);
+  if(special){
+    document.getElementById("hdrSub").textContent = `⚡ ${special.title} · ${dstr}`;
+    document.getElementById("hdrWeekPill").innerHTML = "";
+    renderSpecialToday(special, key, log);
+    showInstallTipIfNeeded();
+    return;
+  }
+
   document.getElementById("hdrSub").textContent = plan ? (plan.title + (plan.subtitle? " · "+plan.subtitle : "")) + " · " + dstr : "Rest Day · " + dstr;
-  document.getElementById("hdrWeekPill").innerHTML = (plan && plan.hasAlt) ? `<span class="weekpill">WEEK ${weekLetter}</span>` : "";
+  document.getElementById("hdrWeekPill").innerHTML = ((plan && plan.hasAlt) ? `<span class="weekpill">WEEK ${weekName(weekLabel)}</span> ` : "")
+    + `<button class="weekpill" id="specialDayBtn" style="border:none;cursor:pointer;">⚡ Special day</button>`;
+  document.getElementById("specialDayBtn").onclick = ()=> showSpecialDayPicker(key);
 
   const view = document.getElementById("view");
 
@@ -736,10 +1109,8 @@ function renderToday(){
     return;
   }
 
-  const items = itemsFor(plan, weekLetter, planSlot);
+  const items = [...itemsFor(plan, weekLabel, planSlot), ...oneTimeItemsFor(log)];
   const doneCount = items.filter(it => log.done[it.id]).length;
-  const cardioItems = items.filter(it=>it.type==="cardio");
-  const allCardioLogged = cardioItems.every(it => log.cardio && log.cardio[it.id]);
   const pct = items.length ? Math.round((doneCount/items.length)*100) : 0;
   const canFinish = items.length>0 && doneCount===items.length;
   const estMin = fmtDurationMin(estimateWorkoutSeconds(items, log));
@@ -759,37 +1130,27 @@ function renderToday(){
   items.forEach(it=>{
     const isDone = !!log.done[it.id];
     if(it.type==="cardio"){
-      const c = (log.cardio && log.cardio[it.id]) ? log.cardio[it.id] : null;
+      const entries = cardioEntriesFor(log, it.id);
+      const isAddingThis = addingCardioFor === it.id;
       html += `
         <div class="exercise">
           <div class="checkbox ${isDone?'checked':''}"></div>
           <div class="ex-body">
             <div class="ex-title-row">
               <span class="ex-name ${isDone?'done':''}">${it.name}</span>
-              ${it._custom ? `<span class="badge-week" style="background:var(--gold);">ADDED</span>` : ""}
+              ${it._oneTime ? `<span class="badge-week" style="background:var(--gold);">ONE-TIME</span>` : (it._custom ? `<span class="badge-week" style="background:var(--gold);">ADDED</span>` : "")}
               <button class="btn small ghost" data-removeex="${it.id}" style="margin-left:auto;padding:2px 9px;font-size:11px;">✕ Remove</button>
             </div>
             <div class="ex-sr">${it.sr}</div>
             <div class="ex-notes">${it.notes}</div>
-            <div class="cardio-card ${c?'logged':''}" data-cardio="${it.id}">
-              ${c ? `
-                <div class="cardio-summary">✅ <b>${c.type}</b> · ${c.distance} ${c.unit} · ${c.duration} min</div>
-                <button class="btn small ghost" data-editcardio="${it.id}" style="margin-top:8px;">Edit</button>
-              ` : `
-                <div class="seg" data-cardiotype="${it.id}">
-                  <button data-val="Run">🏃 Run</button>
-                  <button data-val="Bike">🚴 Bike</button>
-                  <button data-val="Swim">🏊 Swim</button>
-                </div>
-                <div class="row2">
-                  <div class="field"><label>Distance</label><input type="number" inputmode="decimal" step="0.1" min="0" id="dist_${it.id}" placeholder="e.g. 2.5"></div>
-                  <div class="field"><label>Unit</label>
-                    <select id="unit_${it.id}"><option value="mi">mi</option><option value="km">km</option></select>
-                  </div>
-                </div>
-                <div class="field" style="margin-top:8px;"><label>Time (minutes)</label><input type="number" inputmode="numeric" min="0" id="dur_${it.id}" placeholder="e.g. 25"></div>
-                <button class="btn block" data-savecardio="${it.id}">Save cardio</button>
-              `}
+            <div class="cardio-card ${entries.length?'logged':''}" data-cardio="${it.id}">
+              ${entries.map((c,idx)=>`
+                <div class="cardio-summary">
+                  ✅ <b>${c.type}</b> · ${cardioStatsLine(c)}
+                  <div style="margin-top:4px;"><button class="btn small ghost" data-removecardio="${it.id}|${idx}">Remove</button></div>
+                </div>`).join("")}
+              ${(isAddingThis || !entries.length) ? cardioFormHtml(it.id, entries.length>0)
+                : `<button class="btn small ghost block" data-addcardio="${it.id}" style="margin-top:8px;">+ Add another cardio entry</button>`}
             </div>
           </div>
         </div>`;
@@ -821,9 +1182,9 @@ function renderToday(){
           <div class="ex-body">
             <div class="ex-title-row">
               <span class="ex-name ${isDone?'done':''}">${it.name}</span>
-              ${it.week!=="both" ? `<span class="badge-week ${it.week}">${it.week}</span>` : ""}
+              ${it.week!=="both" ? `<span class="badge-week" style="background:${weekColor(it.week)};">${weekName(it.week)}</span>` : ""}
               ${it._customized ? `<span class="badge-week" style="background:var(--gold);">CUSTOM</span>` : ""}
-              ${it._custom ? `<span class="badge-week" style="background:var(--gold);">ADDED</span>` : ""}
+              ${it._oneTime ? `<span class="badge-week" style="background:var(--gold);">ONE-TIME</span>` : (it._custom ? `<span class="badge-week" style="background:var(--gold);">ADDED</span>` : "")}
               <button class="btn small ghost" data-removeex="${it.id}" style="margin-left:auto;padding:2px 9px;font-size:11px;">✕ Remove</button>
             </div>
             ${srBlock}
@@ -840,15 +1201,14 @@ function renderToday(){
         <div class="lbl" style="font-weight:700;font-size:13.5px;margin-bottom:6px;">Add an exercise</div>
         <div class="field"><label>Name</label><input type="text" id="newExName" placeholder="e.g. Face pulls"></div>
         <div class="field" style="margin-top:8px;"><label>Sets x reps (optional)</label><input type="text" id="newExSr" placeholder="e.g. 3 x 12"></div>
-        ${plan.hasAlt ? `
         <div style="margin-top:8px;">
           <label style="font-size:11px;color:var(--muted);font-weight:600;display:block;margin-bottom:3px;">Applies to</label>
-          <div class="seg" id="newExWeekSeg">
+          <div class="seg" id="newExWeekSeg" style="flex-wrap:wrap;">
             <button data-val="both" class="active">Every week</button>
-            <button data-val="A">Week A only</button>
-            <button data-val="B">Week B only</button>
+            ${weekCycle().count>1 ? weekCycle().keys.map(k=>`<button data-val="${k}">${weekName(k)} only</button>`).join("") : ""}
+            <button data-val="once">Just today</button>
           </div>
-        </div>` : ""}
+        </div>
         <div style="display:flex;gap:8px;margin-top:10px;">
           <button class="btn small" id="saveNewExBtn">Add</button>
           <button class="btn small ghost" id="cancelNewExBtn">Cancel</button>
@@ -930,11 +1290,12 @@ function renderToday(){
       const id = btn.getAttribute("data-removeex");
       const it = items.find(x=>x.id===id);
       if(!it) return;
-      const msg = it._custom
+      const msg = (it._custom || it._oneTime)
         ? `Remove "${it.name}" from this workout?`
         : `Remove "${it.name}" from this workout? You can restore it later from Settings.`;
       if(!confirm(msg)) return;
-      if(it._custom) removeCustomExercise(planSlot, id);
+      if(it._oneTime) removeOneTimeExercise(log, id);
+      else if(it._custom) removeCustomExercise(planSlot, id);
       else setRemoved(id, true);
       if(editingExId===id) editingExId = null;
       saveData();
@@ -968,13 +1329,23 @@ function renderToday(){
       const sr = document.getElementById("newExSr").value.trim();
       if(!name){ alert("Enter an exercise name."); return; }
       const week = newExWeekSeg ? (newExWeekSeg.dataset.selected || "both") : "both";
-      addCustomExercise(planSlot, {id:uid("custom"), name, sr, notes:"", url:"", week, custom:true});
+      if(week==="once"){
+        addOneTimeExercise(log, {id:uid("once"), name, sr, notes:"", url:"", week:"both"});
+      } else {
+        addCustomExercise(planSlot, {id:uid("custom"), name, sr, notes:"", url:"", week, custom:true});
+      }
       addingExercise = false;
       saveData();
       renderToday();
     };
   }
-  // cardio seg buttons
+  // cardio seg buttons - switching type also swaps the distance unit
+  // (mi/km for Run/Bike, m/yd for Swim) and the max-speed vs. best-pace field
+  function updateCardioSpeedLabel(id){
+    const unitSel = document.getElementById("unit_"+id);
+    const lbl = document.getElementById("speedlabel_"+id);
+    if(unitSel && lbl) lbl.textContent = `Max speed (${unitSel.value==="km"?"km/h":"mph"})`;
+  }
   view.querySelectorAll("[data-cardiotype]").forEach(seg=>{
     const id = seg.getAttribute("data-cardiotype");
     seg.querySelectorAll("button").forEach(b=>{
@@ -982,8 +1353,22 @@ function renderToday(){
         seg.querySelectorAll("button").forEach(x=>x.classList.remove("active"));
         b.classList.add("active");
         seg.dataset.selected = b.dataset.val;
+        const isSwim = b.dataset.val==="Swim";
+        const unitSel = document.getElementById("unit_"+id);
+        if(unitSel){
+          unitSel.innerHTML = isSwim
+            ? `<option value="m">m</option><option value="yd">yd</option>`
+            : `<option value="mi">mi</option><option value="km">km</option>`;
+        }
+        const speedField = view.querySelector(`[data-speedfield="${id}"]`);
+        const paceField = view.querySelector(`[data-pacefield="${id}"]`);
+        if(speedField) speedField.classList.toggle("hidden", isSwim);
+        if(paceField) paceField.classList.toggle("hidden", !isSwim);
+        updateCardioSpeedLabel(id);
       };
     });
+    const unitSel = document.getElementById("unit_"+id);
+    if(unitSel) unitSel.onchange = ()=> updateCardioSpeedLabel(id);
   });
   view.querySelectorAll("[data-savecardio]").forEach(btn=>{
     btn.onclick = ()=>{
@@ -995,18 +1380,40 @@ function renderToday(){
       const dur = document.getElementById("dur_"+id).value;
       if(!type){ alert("Pick run, bike, or swim first."); return; }
       if(!dist || !dur){ alert("Add distance and time."); return; }
+      const entry = {type, distance:dist, unit, duration:dur};
+      if(type==="Swim"){
+        const min = parseInt(document.getElementById("pacemin_"+id).value, 10);
+        const sec = parseInt(document.getElementById("pacesec_"+id).value, 10);
+        if(!isNaN(min) || !isNaN(sec)) entry.bestPace100Sec = (isNaN(min)?0:min)*60 + (isNaN(sec)?0:sec);
+      } else {
+        const ms = parseFloat(document.getElementById("maxspeed_"+id).value);
+        if(!isNaN(ms) && ms>0) entry.maxSpeed = ms;
+      }
       if(!log.cardio) log.cardio = {};
-      log.cardio[id] = {type, distance:dist, unit, duration:dur};
+      log.cardio[id] = cardioEntriesFor(log, id);
+      log.cardio[id].push(entry);
       log.done[id] = true;
+      addingCardioFor = null;
       saveData();
       renderToday();
     };
   });
-  view.querySelectorAll("[data-editcardio]").forEach(btn=>{
+  view.querySelectorAll("[data-addcardio]").forEach(btn=>{
     btn.onclick = ()=>{
-      const id = btn.getAttribute("data-editcardio");
-      delete log.cardio[id];
-      log.done[id] = false;
+      addingCardioFor = btn.getAttribute("data-addcardio");
+      renderToday();
+    };
+  });
+  view.querySelectorAll("[data-cancelcardio]").forEach(btn=>{
+    btn.onclick = ()=>{ addingCardioFor = null; renderToday(); };
+  });
+  view.querySelectorAll("[data-removecardio]").forEach(btn=>{
+    btn.onclick = ()=>{
+      const [id, idxStr] = btn.getAttribute("data-removecardio").split("|");
+      const entries = cardioEntriesFor(log, id);
+      entries.splice(parseInt(idxStr,10), 1);
+      log.cardio[id] = entries;
+      log.done[id] = entries.length>0;
       saveData();
       renderToday();
     };
@@ -1028,6 +1435,157 @@ function renderToday(){
     };
   }
   showInstallTipIfNeeded();
+}
+
+/* ============================= RENDER: SPECIAL TRAINING DAY (TODAY) ============================= */
+function renderSpecialToday(special, key, log){
+  const view = document.getElementById("view");
+  const completed = !!log.fullyCompleted;
+
+  let html = `
+    <div class="card">
+      <div class="ex-title-row">
+        <span class="ex-name" style="font-size:17px;">⚡ ${special.title}</span>
+      </div>
+      ${special.description ? `<div class="ex-notes" style="margin-top:4px;">${special.description}</div>` : ""}`;
+
+  if(completed){
+    html += `
+      <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line);">
+        <div style="font-size:13px;font-weight:700;color:var(--green);">✅ Completed</div>
+        ${log.specialNotes ? `<div class="ex-notes" style="margin-top:8px;white-space:pre-wrap;">${log.specialNotes}</div>` : ""}
+        ${(log.specialActivities||[]).map(a=>`
+          <div class="exercise">
+            <div class="checkbox checked"></div>
+            <div class="ex-body">
+              <div class="ex-name">${a.title}</div>
+              ${a.description ? `<div class="ex-notes" style="margin-top:2px;">${a.description}</div>` : ""}
+            </div>
+          </div>`).join("")}
+        <button class="btn small ghost" id="editSpecialBtn" style="margin-top:10px;">Edit</button>
+      </div>`;
+  } else {
+    if(!specialDraft) specialDraft = {notes:"", activities:[]};
+    html += `
+      <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line);">
+        <div class="field"><label>Notes</label><textarea id="specialNotesInput" rows="3" placeholder="How did it go?">${specialDraft.notes}</textarea></div>
+        <div class="lbl" style="font-weight:700;font-size:13.5px;margin-top:14px;">Activities</div>
+        ${specialDraft.activities.map((a,idx)=>`
+          <div class="row2" style="margin-top:8px;align-items:flex-end;">
+            <div class="field"><label>Title</label><input type="text" id="specialActTitle_${idx}" value="${a.title}" placeholder="e.g. Trail hike"></div>
+            <div class="field"><label>Description</label><input type="text" id="specialActDesc_${idx}" value="${a.description}" placeholder="optional"></div>
+          </div>
+          <button class="btn small ghost" data-removeact="${idx}" style="margin-top:4px;padding:3px 9px;font-size:11px;">✕ Remove</button>`).join("")}
+        <button class="btn small ghost block" id="addActivityBtn" style="margin-top:10px;">+ Add activity</button>
+        <button class="btn finish-btn" id="completeSpecialBtn" style="margin-top:14px;">Complete Special Training Day</button>
+        <button class="btn small ghost" id="unscheduleSpecialBtn" style="margin-top:10px;">↩ Back to normal workout</button>
+      </div>`;
+  }
+  html += `</div>` + goalExercisesCardHtml(key);
+  view.innerHTML = html;
+  wireGoalExerciseCheckboxes(key, view);
+
+  const editBtn = document.getElementById("editSpecialBtn");
+  if(editBtn){
+    editBtn.onclick = ()=>{
+      specialDraft = {notes: log.specialNotes||"", activities: (log.specialActivities||[]).map(a=>({...a}))};
+      renderToday();
+    };
+  }
+  const addActBtn = document.getElementById("addActivityBtn");
+  if(addActBtn){
+    addActBtn.onclick = ()=>{
+      readSpecialDraftFromView(view);
+      specialDraft.activities.push({id:uid("act"), title:"", description:""});
+      renderToday();
+    };
+  }
+  view.querySelectorAll("[data-removeact]").forEach(btn=>{
+    btn.onclick = ()=>{
+      readSpecialDraftFromView(view);
+      specialDraft.activities.splice(parseInt(btn.getAttribute("data-removeact"),10), 1);
+      renderToday();
+    };
+  });
+  const completeBtn = document.getElementById("completeSpecialBtn");
+  if(completeBtn){
+    completeBtn.onclick = ()=>{
+      readSpecialDraftFromView(view);
+      const cleanActivities = specialDraft.activities
+        .map(a=>({id:a.id, title:(a.title||"").trim(), description:(a.description||"").trim()}))
+        .filter(a=>a.title || a.description);
+      log.specialDayId = special.id;
+      log.specialTitle = special.title;
+      log.specialDescription = special.description || "";
+      log.specialNotes = (specialDraft.notes||"").trim();
+      log.specialActivities = cleanActivities;
+      log.fullyCompleted = true;
+      log.completedAt = Date.now();
+      specialDraft = null;
+      saveData();
+      const newBadges = checkNewBadges();
+      renderToday();
+      if(newBadges.length){ showBadgeToast(newBadges); }
+      else { showSimpleToast("Nice work! 🎉", `Logged "${special.title}" for ${DOW_NAMES[new Date(key+"T00:00:00").getDay()]}.`); }
+    };
+  }
+  const unschedBtn = document.getElementById("unscheduleSpecialBtn");
+  if(unschedBtn){
+    unschedBtn.onclick = ()=>{
+      unscheduleSpecialDay(key);
+      specialDraft = null;
+      saveData();
+      renderToday();
+    };
+  }
+}
+function readSpecialDraftFromView(view){
+  if(!specialDraft) return;
+  const notesEl = view.querySelector("#specialNotesInput");
+  if(notesEl) specialDraft.notes = notesEl.value;
+  specialDraft.activities.forEach((a,idx)=>{
+    const t = view.querySelector(`#specialActTitle_${idx}`);
+    const de = view.querySelector(`#specialActDesc_${idx}`);
+    if(t) a.title = t.value;
+    if(de) a.description = de.value;
+  });
+}
+// Picker modal for assigning a special-day template to `dateStr`. `afterPick`
+// (defaults to re-rendering Today) lets callers from other contexts - like
+// the History day modal - control what refreshes after scheduling.
+function showSpecialDayPicker(dateStr, afterPick){
+  afterPick = afterPick || renderToday;
+  const root = document.getElementById("modalRoot");
+  const hasTemplates = DATA.specialDays.length>0;
+  root.innerHTML = `
+    <div class="toast-overlay" id="specialPickOverlay">
+      <div class="modal-day" style="position:relative;max-height:78vh;overflow-y:auto;text-align:left;">
+        <button class="close-x" id="specialPickClose">×</button>
+        <h3>Use a special training day</h3>
+        ${hasTemplates ? DATA.specialDays.map(s=>`
+          <button class="btn block ghost" data-pickspecial="${s.id}" style="margin-top:8px;text-align:left;">
+            <b>${s.title}</b>${s.description ? `<div style="font-size:12px;font-weight:400;color:var(--muted);margin-top:2px;">${s.description}</div>` : ""}
+          </button>`).join("") : `
+          <p style="color:var(--muted);font-size:13.5px;">You haven't created any special training days yet.</p>
+          <button class="btn block" id="goCreateSpecialBtn">Create one in Settings</button>
+        `}
+      </div>
+    </div>`;
+  document.getElementById("specialPickClose").onclick = ()=>{ root.innerHTML=""; };
+  document.getElementById("specialPickOverlay").onclick = (e)=>{ if(e.target.id==="specialPickOverlay") root.innerHTML=""; };
+  root.querySelectorAll("[data-pickspecial]").forEach(btn=>{
+    btn.onclick = ()=>{
+      scheduleSpecialDay(dateStr, btn.getAttribute("data-pickspecial"));
+      saveData();
+      root.innerHTML = "";
+      specialDraft = null;
+      afterPick();
+    };
+  });
+  const goBtn = document.getElementById("goCreateSpecialBtn");
+  if(goBtn){
+    goBtn.onclick = ()=>{ root.innerHTML=""; renderTab("settings"); };
+  }
 }
 
 function showInstallTipIfNeeded(){
@@ -1113,8 +1671,14 @@ function renderHistory(){
     else if(dow===0) cls = "rest";
     else if(log && log.fullyCompleted) cls = "done";
     else if(d < today) cls = "missed";
+    // a completed special training day always reads as done, even on an
+    // otherwise-always-rest Sunday
+    if(log && log.specialDayId && log.fullyCompleted) cls = "done";
     if(dateKey(d)===dateKey(today)) cls += " today";
-    cells += `<div class="cal-cell ${cls}" data-date="${key}">${day}</div>`;
+    const completedSpecial = log && log.specialDayId;
+    const scheduledSpecial = !completedSpecial && DATA.settings.scheduledSpecialDays && DATA.settings.scheduledSpecialDays[key];
+    const mark = completedSpecial ? `<span class="special-mark">⚡</span>` : (scheduledSpecial ? `<span class="special-mark dim">⚡</span>` : "");
+    cells += `<div class="cal-cell ${cls}" data-date="${key}">${day}${mark}</div>`;
   }
 
   const view = document.getElementById("view");
@@ -1161,14 +1725,26 @@ function showDayModal(key){
   const log = DATA.logs[key];
   const d = new Date(key+"T00:00:00");
   const dow = d.getDay();
-  const planSlot = mappedDow(dow);
+  const weekLabel = (log && log.week) || weekLabelFor(d);
+  const planSlot = mappedDow(dow, weekLabel);
   const plan = PLAN[planSlot];
   const isFuture = d > todayDate();
   const root = document.getElementById("modalRoot");
   let body = "";
   let weekBadge = "";
 
-  if(dow===0){
+  const special = specialDayFor(key);
+  if(special){
+    body = special.description ? `<p style="color:var(--muted);font-size:13px;margin:-4px 0 8px;">${special.description}</p>` : "";
+    if(special.frozen){
+      body += `<div class="item"><b>Status</b><b>Completed ✅</b></div>`;
+      if(log.specialNotes) body += `<div style="font-size:13.5px;margin-top:8px;"><b>Notes:</b> ${log.specialNotes}</div>`;
+      body += (log.specialActivities||[]).map(a=>
+        `<div class="item"><span>${a.title}${a.description?` — ${a.description}`:""}</span><span>✅</span></div>`).join("");
+    } else {
+      body += `<p style="color:var(--muted);font-size:13.5px;">${isFuture ? "Scheduled - nothing logged yet." : "Scheduled - open the Today tab to log it."}</p>`;
+    }
+  } else if(dow===0){
     // Sunday / rest day
     if(log){
       body = `<p style="color:var(--muted);font-size:13.5px;">${log.fullyCompleted? "Marked as rested ✅" : "Not logged"}</p>`;
@@ -1176,9 +1752,8 @@ function showDayModal(key){
       body = `<p style="color:var(--muted);font-size:13.5px;">${isFuture ? "Rest day - nothing scheduled." : "Nothing logged for this day."}</p>`;
     }
   } else if(plan){
-    const weekLetter = (log && log.week) || weekLetterFor(d);
-    const items = itemsFor(plan, weekLetter, planSlot);
-    if(plan.hasAlt) weekBadge = `<span class="badge-week ${weekLetter}" style="margin-left:8px;">WEEK ${weekLetter}</span>`;
+    const items = [...itemsFor(plan, weekLabel, planSlot), ...(log ? oneTimeItemsFor(log) : [])];
+    if(plan.hasAlt) weekBadge = `<span class="badge-week" style="margin-left:8px;background:${weekColor(weekLabel)};">WEEK ${weekName(weekLabel)}</span>`;
 
     if(log){
       // already logged / in progress - show what was actually done, frozen at completion time
@@ -1188,9 +1763,9 @@ function showDayModal(key){
         const snap = log.exerciseSnapshots && log.exerciseSnapshots[it.id];
         const displayName = (done && snap) ? snap.name : it.name;
         let extra = "";
-        if(it.type==="cardio" && log.cardio && log.cardio[it.id]){
-          const c = log.cardio[it.id];
-          extra = ` — ${c.type}, ${c.distance}${c.unit}, ${c.duration}min`;
+        if(it.type==="cardio"){
+          const entries = cardioEntriesFor(log, it.id);
+          if(entries.length) extra = ` — ` + entries.map(c=>`${c.type}, ${c.distance}${c.unit}, ${c.duration}min`).join("; ");
         } else if(done && snap && snap.sr){
           extra = ` — ${snap.sr}`;
         }
@@ -1209,16 +1784,26 @@ function showDayModal(key){
     }
   }
 
+  if(!special || !special.frozen){
+    body += `<button class="btn small ghost block" id="scheduleSpecialBtn" style="margin-top:12px;">⚡ ${special ? "Change special training day" : "Use a special training day"}</button>`;
+  }
+
   root.innerHTML = `
     <div class="toast-overlay" id="dayOverlay">
       <div class="modal-day" style="position:relative;max-height:78vh;overflow-y:auto;">
         <button class="close-x" id="dayClose">×</button>
-        <h3>${DOW_NAMES[dow]} · ${MONTH_NAMES[d.getMonth()]} ${d.getDate()}${weekBadge}</h3>
+        <h3>${special ? "⚡ "+special.title : DOW_NAMES[dow]} · ${MONTH_NAMES[d.getMonth()]} ${d.getDate()}${weekBadge}</h3>
         ${body}
       </div>
     </div>`;
   document.getElementById("dayClose").onclick = ()=>{ root.innerHTML=""; };
   document.getElementById("dayOverlay").onclick = (e)=>{ if(e.target.id==="dayOverlay") root.innerHTML=""; };
+  const schedBtn = document.getElementById("scheduleSpecialBtn");
+  if(schedBtn){
+    schedBtn.onclick = ()=>{
+      showSpecialDayPicker(key, ()=>{ renderHistory(); showDayModal(key); });
+    };
+  }
 }
 
 /* ============================= RENDER: AWARDS ============================= */
@@ -1453,6 +2038,37 @@ function showNewGoalModal(){
   };
 }
 
+function showNewSpecialModal(){
+  const root = document.getElementById("modalRoot");
+  root.innerHTML = `
+    <div class="toast-overlay" id="specialModalOverlay">
+      <div class="modal-day" style="position:relative;max-height:82vh;overflow-y:auto;text-align:left;">
+        <button class="close-x" id="specialModalClose">×</button>
+        <h3>New Special Training Day</h3>
+        <div class="field" style="margin-bottom:10px;">
+          <label>Title</label>
+          <input type="text" id="newSpecialTitle" placeholder="e.g. Trail Hike Day">
+        </div>
+        <div class="field">
+          <label>Description (optional)</label>
+          <textarea id="newSpecialDesc" rows="4" placeholder="What this day is about"></textarea>
+        </div>
+        <button class="btn block" id="createSpecialBtn" style="margin-top:12px;">Create</button>
+      </div>
+    </div>`;
+  document.getElementById("specialModalClose").onclick = ()=>{ root.innerHTML=""; };
+  document.getElementById("specialModalOverlay").onclick = (e)=>{ if(e.target.id==="specialModalOverlay") root.innerHTML=""; };
+  document.getElementById("createSpecialBtn").onclick = ()=>{
+    const title = document.getElementById("newSpecialTitle").value.trim();
+    if(!title){ alert("Give it a title first."); return; }
+    const description = document.getElementById("newSpecialDesc").value.trim();
+    addSpecialDayTemplate(title, description);
+    saveData();
+    root.innerHTML = "";
+    renderSettings();
+  };
+}
+
 function addPlancheTemplateGoal(){
   const goal = {
     id: uid("goal"),
@@ -1506,7 +2122,11 @@ function renderSettings(){
   document.getElementById("hdrWeekPill").innerHTML = "";
 
   const view = document.getElementById("view");
-  const wo = DATA.settings.weekOverride || "auto";
+  const wc = weekCycle();
+  if(!swapWeekSelected || !wc.keys.includes(swapWeekSelected)) swapWeekSelected = wc.keys[0];
+  const swapWeekKey = swapWeekSelected;
+  if(!swapSideAWeek || !wc.keys.includes(swapSideAWeek)) swapSideAWeek = wc.keys[0];
+  if(!swapSideBWeek || !wc.keys.includes(swapSideBWeek)) swapSideBWeek = wc.keys[0];
   const stats = computeStats();
   const lastBackupAt = DATA.settings.lastBackupAt || null;
   const daysSinceBackup = lastBackupAt ? Math.floor((Date.now()-lastBackupAt)/86400000) : null;
@@ -1525,14 +2145,31 @@ function renderSettings(){
     <div class="card">
       <div class="settings-row">
         <div>
-          <div class="lbl">Week A / B rotation</div>
-          <div class="desc">Auto switches every calendar week. Force a week if it ever gets out of sync.</div>
+          <div class="lbl">Training week cycle</div>
+          <div class="desc">Auto rotates through your weeks every calendar week. Force one if it ever gets out of sync.</div>
         </div>
       </div>
-      <div class="seg" id="weekSeg" style="margin-top:4px;">
-        <button data-val="auto" class="${wo==='auto'?'active':''}">Auto</button>
-        <button data-val="A" class="${wo==='A'?'active':''}">Force A</button>
-        <button data-val="B" class="${wo==='B'?'active':''}">Force B</button>
+      <div class="seg" id="weekSeg" style="margin-top:4px;flex-wrap:wrap;">
+        <button data-val="auto" class="${wc.override==='auto'?'active':''}">Auto</button>
+        ${wc.keys.map(k=>`<button data-val="${k}" class="${wc.override===k?'active':''}">Force ${weekName(k)}</button>`).join("")}
+      </div>
+
+      <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line);">
+        <div class="lbl" style="font-size:13.5px;font-weight:700;">Weeks in rotation</div>
+        ${wc.keys.map((k,i)=>`
+          <div class="row2" style="margin-top:8px;align-items:center;">
+            <span class="badge-week" style="background:${weekColor(k)};flex:0 0 auto;">${i+1}</span>
+            <div class="field"><input type="text" data-weekname="${k}" value="${weekName(k)}"></div>
+          </div>`).join("")}
+        <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;">
+          <button class="btn small ghost" id="addWeekBtn">+ Add a week</button>
+          ${wc.count>1 ? `<button class="btn small ghost" id="removeWeekBtn">− Remove last week</button>` : ""}
+        </div>
+        <div style="font-size:11.5px;color:var(--muted);margin-top:8px;line-height:1.5;">
+          A new week is seeded as a full copy of an earlier week's exercises, ready to edit from there -
+          it won't start empty.
+        </div>
+        ${!isWeekCycleDefault() ? `<button class="btn small ghost" id="resetWeekCycleBtn" style="margin-top:8px;">Restore 2-week A/B cycle</button>` : ""}
       </div>
     </div>
 
@@ -1540,22 +2177,61 @@ function renderSettings(){
       <div class="settings-row">
         <div>
           <div class="lbl">Swap workout days</div>
-          <div class="desc">Permanently swap which day two workouts fall on. Applies to this week and every week after.</div>
+          <div class="desc">Permanently swap which day two workouts fall on - within one week, or between two different weeks.</div>
         </div>
       </div>
-      <div class="row2" style="margin-top:8px;align-items:flex-end;">
+      <div class="lbl" style="font-size:12px;margin-top:10px;">Day A</div>
+      <div class="row2" style="margin-top:4px;align-items:flex-end;">
         <div class="field">
-          <label>Day A</label>
-          <select id="swapDayA">${swappableDayOptions()}</select>
+          <label>Week</label>
+          <select id="swapWeekA">${wc.keys.map(k=>`<option value="${k}" ${k===swapSideAWeek?"selected":""}>${weekName(k)}</option>`).join("")}</select>
         </div>
         <div class="field">
-          <label>Day B</label>
-          <select id="swapDayB">${swappableDayOptions()}</select>
+          <label>Day</label>
+          <select id="swapDayA">${swappableDayOptions(swapSideAWeek)}</select>
         </div>
       </div>
-      <button class="btn block" id="swapDaysBtn">⇄ Swap these days</button>
-      <div style="font-size:11.5px;color:var(--muted);margin-top:10px;line-height:1.7;">${dayOrderSummary()}</div>
-      ${isDayMapDefault() ? "" : `<button class="btn small ghost" id="resetDaysBtn" style="margin-top:8px;">Restore original day order</button>`}
+      <div class="lbl" style="font-size:12px;margin-top:10px;">Day B</div>
+      <div class="row2" style="margin-top:4px;align-items:flex-end;">
+        <div class="field">
+          <label>Week</label>
+          <select id="swapWeekB">${wc.keys.map(k=>`<option value="${k}" ${k===swapSideBWeek?"selected":""}>${weekName(k)}</option>`).join("")}</select>
+        </div>
+        <div class="field">
+          <label>Day</label>
+          <select id="swapDayB">${swappableDayOptions(swapSideBWeek)}</select>
+        </div>
+      </div>
+      <button class="btn block" id="swapDaysBtn" style="margin-top:10px;">⇄ Swap these days</button>
+
+      <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line);">
+        <div class="field">
+          <label>Current order for</label>
+          <select id="swapWeekSelect">
+            ${wc.keys.map(k=>`<option value="${k}" ${k===swapWeekKey?"selected":""}>${weekName(k)}</option>`).join("")}
+          </select>
+        </div>
+        <div style="font-size:11.5px;color:var(--muted);margin-top:10px;line-height:1.7;">${dayOrderSummary(swapWeekKey)}</div>
+        ${isDayMapDefaultForWeek(swapWeekKey) ? "" : `<button class="btn small ghost" id="resetDaysBtn" style="margin-top:8px;">Restore original day order for ${weekName(swapWeekKey)}</button>`}
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="settings-row">
+        <div>
+          <div class="lbl">Special Training Days</div>
+          <div class="desc">Reusable templates you can swap in for any day's normal workout - from Today or the History calendar.</div>
+        </div>
+      </div>
+      ${DATA.specialDays.length ? DATA.specialDays.map(s=>`
+        <div class="settings-row">
+          <div>
+            <div class="lbl" style="font-size:13.5px;font-weight:600;">${s.title}</div>
+            ${s.description ? `<div class="desc">${s.description}</div>` : ""}
+          </div>
+          <button class="btn small ghost" data-delspecial="${s.id}">Delete</button>
+        </div>`).join("") : `<div style="font-size:12.5px;color:var(--muted);margin-top:6px;">None yet.</div>`}
+      <button class="btn block" id="newSpecialBtn" style="margin-top:10px;">+ New special training day</button>
     </div>
 
     ${removedExercisesSummary()}
@@ -1600,28 +2276,80 @@ function renderSettings(){
 
   document.getElementById("weekSeg").querySelectorAll("button").forEach(b=>{
     b.onclick = ()=>{
-      DATA.settings.weekOverride = b.getAttribute("data-val");
+      weekCycle().override = b.getAttribute("data-val");
       saveData();
       renderSettings();
     };
   });
-  document.getElementById("swapDaysBtn").onclick = ()=>{
-    const a = parseInt(document.getElementById("swapDayA").value, 10);
-    const b = parseInt(document.getElementById("swapDayB").value, 10);
-    if(a===b) return;
-    if(!DATA.settings.dayMap) DATA.settings.dayMap = {...DEFAULT_DAY_MAP};
-    const map = DATA.settings.dayMap;
-    const tmp = map[a] || a;
-    map[a] = map[b] || b;
-    map[b] = tmp;
+  view.querySelectorAll("[data-weekname]").forEach(input=>{
+    input.onchange = ()=>{
+      const name = input.value.trim();
+      if(name) renameWeek(input.getAttribute("data-weekname"), name);
+      saveData();
+      renderSettings();
+    };
+  });
+  document.getElementById("addWeekBtn").onclick = ()=>{
+    addWeekToCycle();
     saveData();
     renderSettings();
-    showSimpleToast("Days swapped", `${DOW_NAMES[a]} and ${DOW_NAMES[b]} will now swap workouts every week, starting immediately.`);
+    showSimpleToast("Week added", "New week seeded from an earlier week's exercises - rename and edit it below, or on Today once it's active.");
+  };
+  const removeWeekBtn = document.getElementById("removeWeekBtn");
+  if(removeWeekBtn){
+    removeWeekBtn.onclick = ()=>{
+      if(!confirm("Remove the last week from the rotation? Any exercises you added to it won't be deleted, but they'll stop appearing.")) return;
+      removeLastWeekFromCycle();
+      saveData();
+      renderSettings();
+    };
+  }
+  const resetWeekCycleBtn = document.getElementById("resetWeekCycleBtn");
+  if(resetWeekCycleBtn){
+    resetWeekCycleBtn.onclick = ()=>{
+      if(!confirm("Restore the original 2-week A/B cycle? Weeks beyond A/B will stop appearing (their exercises aren't deleted).")) return;
+      resetWeekCycle();
+      saveData();
+      renderSettings();
+    };
+  }
+  document.getElementById("swapWeekA").onchange = (e)=>{
+    swapSideAWeek = e.target.value;
+    renderSettings();
+  };
+  document.getElementById("swapWeekB").onchange = (e)=>{
+    swapSideBWeek = e.target.value;
+    renderSettings();
+  };
+  document.getElementById("swapWeekSelect").onchange = (e)=>{
+    swapWeekSelected = e.target.value;
+    renderSettings();
+  };
+  document.getElementById("swapDaysBtn").onclick = ()=>{
+    const weekA = document.getElementById("swapWeekA").value;
+    const dowA = parseInt(document.getElementById("swapDayA").value, 10);
+    const weekB = document.getElementById("swapWeekB").value;
+    const dowB = parseInt(document.getElementById("swapDayB").value, 10);
+    if(weekA===weekB && dowA===dowB) return;
+    const mapA = {...dayMapForWeek(weekA)};
+    const mapB = weekA===weekB ? mapA : {...dayMapForWeek(weekB)};
+    const pA = mapA[dowA] || dowA;
+    const pB = mapB[dowB] || dowB;
+    mapA[dowA] = pB;
+    mapB[dowB] = pA;
+    setDayMapForWeek(weekA, mapA);
+    setDayMapForWeek(weekB, mapB);
+    saveData();
+    renderSettings();
+    const msg = weekA===weekB
+      ? `${DOW_NAMES[dowA]} and ${DOW_NAMES[dowB]} will now swap workouts in ${weekName(weekA)}, starting the next time that week comes around.`
+      : `${DOW_NAMES[dowA]} (${weekName(weekA)}) and ${DOW_NAMES[dowB]} (${weekName(weekB)}) will now swap workouts, starting the next time each week comes around.`;
+    showSimpleToast("Days swapped", msg);
   };
   const resetDaysBtn = document.getElementById("resetDaysBtn");
   if(resetDaysBtn){
     resetDaysBtn.onclick = ()=>{
-      DATA.settings.dayMap = {...DEFAULT_DAY_MAP};
+      setDayMapForWeek(swapWeekKey, {...DEFAULT_DAY_MAP});
       saveData();
       renderSettings();
     };
@@ -1629,6 +2357,17 @@ function renderSettings(){
   view.querySelectorAll("[data-restoreex]").forEach(btn=>{
     btn.onclick = ()=>{
       setRemoved(btn.getAttribute("data-restoreex"), false);
+      saveData();
+      renderSettings();
+    };
+  });
+  document.getElementById("newSpecialBtn").onclick = ()=> showNewSpecialModal();
+  view.querySelectorAll("[data-delspecial]").forEach(btn=>{
+    btn.onclick = ()=>{
+      const id = btn.getAttribute("data-delspecial");
+      const tmpl = DATA.specialDays.find(s=>s.id===id);
+      if(!confirm(`Delete "${tmpl?tmpl.title:'this'}"? Days already completed with it keep their record either way.`)) return;
+      deleteSpecialDayTemplate(id);
       saveData();
       renderSettings();
     };
@@ -1676,8 +2415,8 @@ function renderSettings(){
         const parsed = JSON.parse(reader.result);
         if(parsed && parsed.logs){
           DATA = parsed;
-          if(!DATA.goals) DATA.goals = [];
-          if(!DATA.settings.dayMap) DATA.settings.dayMap = {...DEFAULT_DAY_MAP};
+          if(!DATA.settings) DATA.settings = {};
+          migrateData();
           saveData();
           showSimpleToast("Imported!", "Your backup has been restored.");
           renderSettings();
@@ -1688,7 +2427,7 @@ function renderSettings(){
   };
   document.getElementById("resetBtn").onclick = ()=>{
     if(confirm("Erase all workout history, streaks, and badges? This can't be undone.")){
-      DATA = {logs:{}, settings:{weekOverride:"auto"}, earnedBadges:{}, goals:[]};
+      DATA = {logs:{}, settings:{weekOverride:"auto", scheduledSpecialDays:{}}, earnedBadges:{}, goals:[], specialDays:[]};
       saveData();
       showSimpleToast("Reset complete", "Starting fresh.");
       renderSettings();
@@ -1699,7 +2438,7 @@ function renderSettings(){
 /* ============================= TAB SWITCHING ============================= */
 function renderTab(tab){
   activeTab = tab;
-  if(tab!=="today"){ editingExId = null; addingExercise = false; }
+  if(tab!=="today"){ editingExId = null; addingExercise = false; addingCardioFor = null; specialDraft = null; }
   document.querySelectorAll("nav.tabbar button").forEach(b=>{
     b.classList.toggle("active", b.getAttribute("data-tab")===tab);
   });
